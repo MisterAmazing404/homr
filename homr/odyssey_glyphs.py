@@ -52,14 +52,12 @@ class PageInk:
         masks: dict[str, NDArray] | None = None,
         origin: tuple[float, float] = (0.0, 0.0),
         step: tuple[float, float] = (1.0, 1.0),
-        unit: float | None = None,
     ) -> None:
         """
         `gray`: the page, grayscale. `masks`: Homr's segmentation masks by name ("notehead",
         "stems_rest", "clefs_keys", "staff") as predicted, i.e. in the resized/cropped frame;
         `origin` and `step` place that frame in the page (the page point of mask pixel (0, 0) and
-        the page distance of one mask pixel). `unit`: the staff space in pixels, if known; it sets the
-        size of the structuring elements (taken from the first staff otherwise).
+        the page distance of one mask pixel).
         """
         self.gray = gray
         self.shape = gray.shape
@@ -93,7 +91,6 @@ class PageInk:
         self._labels: NDArray | None = None
         self._stats: NDArray | None = None
         self._owned: NDArray | None = None
-        self._unit = unit
 
     # -- the ink that is left once the staff lines are gone
 
