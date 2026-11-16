@@ -16,6 +16,7 @@ from homr import main as homr_main
 from homr.model import MultiStaff, Staff
 from homr.music_xml_generator import TimeSignature, XmlGeneratorArguments, generate_xml
 from homr.odyssey_align import OdysseyContext, StaffGeometry
+from homr.odyssey_glyphs import PageInk
 from homr.onnx_providers import coreml_available, cuda_available, rocm_available
 from homr.simple_logging import eprint
 from homr.staff_parsing import parse_staffs
@@ -131,7 +132,7 @@ def run_page(
 
     transformer_config = Config()
     transformer_config.use_gpu_inference = config.transformer_use_gpu
-    context = OdysseyContext(single.bar_lines, cv2.imread(image_path, cv2.IMREAD_GRAYSCALE))
+    context = _context(single, image_path)
     voices = parse_staffs(
         single.debug,
         multi_staffs,
@@ -152,6 +153,22 @@ def run_page(
         geometry=context.geometry,
         last_times=last_time_signatures(xml),
     )
+
+
+def _context(single: "homr_main.SingleStaffs", image_path: str) -> OdysseyContext:
+    """The page as supplied, with Homr's segmentation resampled into it, for rests and hairpins."""
+    gray = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    origin = single.to_input_image((0.0, 0.0))
+    corner = single.to_input_image((1.0, 1.0))
+    p = single.predictions
+    masks = {
+        "notehead": p.notehead,
+        "stems_rest": p.stems_rest,
+        "clefs_keys": p.clefs_keys,
+        "staff": p.staff,
+    }
+    page = PageInk(gray, masks, origin, (corner[0] - origin[0], corner[1] - origin[1]))
+    return OdysseyContext(single.bar_lines, gray, page)
 
 
 def _group_by_template(
