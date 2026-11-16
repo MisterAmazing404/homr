@@ -31,7 +31,7 @@ def _page() -> tuple[ET.Element, dict[str, EncodedSymbol]]:
     ]
     flat = [*symbols[:2], EncodedSymbol("chord"), symbols[2], *symbols[3:]]
     # the second note of a chord is written after a "chord" marker in homr's token stream
-    root = generate_xml(XmlGeneratorArguments(False, None, None), [flat], "")
+    root = generate_xml(XmlGeneratorArguments(False, None, None, image_positions=False), [flat], "")
     return root, {s.odyssey_id: s for s in symbols if s.odyssey_id}
 
 
