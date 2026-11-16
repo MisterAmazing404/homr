@@ -10,6 +10,7 @@ from fractions import Fraction
 import numpy as np
 
 from homr import constants
+from homr.odyssey_boxes import box_field
 from homr.simple_logging import eprint
 from homr.transformer.vocabulary import (
     OCTAVE_SHIFT_STOP,

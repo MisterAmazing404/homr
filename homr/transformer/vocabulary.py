@@ -469,6 +469,9 @@ class EncodedSymbol:
         self.odyssey_id: str | None = None
         # True if image_coordinates were snapped to a detected notehead/rest/barline
         self.snapped: bool = False
+        # Odyssey: the matched detection's axis-aligned box (x, y, width, height) in the pixels of
+        # the input image, only for a snapped symbol (see odyssey_boxes.py)
+        self.odyssey_box: tuple[float, float, float, float] | None = None
         self._duration: SymbolDuration | None = None
 
     def is_tuplet(self) -> bool:
