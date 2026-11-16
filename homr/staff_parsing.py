@@ -350,6 +350,8 @@ def parse_staffs(
     selected_staff: int = -1,
     page_to_input_image: PointMapping = identity,
     odyssey: OdysseyContext | None = None,
+    slots: list[tuple[int, ...]] | None = None,
+    slot_is_grandstaff: tuple[bool, ...] | None = None,
 ) -> list[list[EncodedSymbol]]:
     """
     Dewarps each staff and then runs it through an algorithm which extracts
@@ -359,7 +361,10 @@ def parse_staffs(
     it's used to fill EncodedSymbol.image_coordinates.
     """
     parts = [tuple(range(len(row.staffs))) for row in staffs]
-    if len({len(staff.staffs) for staff in staffs}) > 1:
+    if slots is not None and slot_is_grandstaff is not None:
+        # Odyssey: the user said which part each staff is, no need to guess
+        parts = slots
+    elif len({len(staff.staffs) for staff in staffs}) > 1:
         # The voices are read across systems, a system with fewer staffs hides some
         assigned = _assign_parts(staffs)
         if assigned is None:
@@ -371,8 +376,12 @@ def parse_staffs(
             parts = assigned
     # For simplicity we call every staff in a multi staff a voice,
     # even if it's part of a grand staff.
-    number_of_voices = max(len(staff.staffs) for staff in staffs)
-    layout = next(_layout(row) for row in staffs if len(row.staffs) == number_of_voices)
+    if slots is not None and slot_is_grandstaff is not None:
+        number_of_voices = len(slot_is_grandstaff)
+        layout = slot_is_grandstaff
+    else:
+        number_of_voices = max(len(staff.staffs) for staff in staffs)
+        layout = next(_layout(row) for row in staffs if len(row.staffs) == number_of_voices)
     i = 0
     results: dict[tuple[int, int], list[EncodedSymbol]] = {}
     regions = StaffRegions(staffs)

@@ -184,19 +184,24 @@ class ScoreDecoder:
         return cache, input_names, output_names
 
 
-def _softmax_max(logits: NDArray) -> float:
-    shifted = logits.astype(np.float64) - np.max(logits)
-    exp = np.exp(shifted)
-    return float(exp.max() / exp.sum())
+def _top2_ratio(logits: NDArray) -> float:
+    """p1 / (p1 + p2) of the two most likely tokens: 1.0 when the model has no second guess,
+    0.5 when two tokens are equally likely. Unlike the raw probability, which label smoothing
+    keeps near 0.9 for almost every symbol, this separates sure from unsure choices."""
+    flat = logits.astype(np.float64).reshape(-1)
+    shifted = np.exp(flat - flat.max())
+    p = shifted / shifted.sum()
+    second, first = np.partition(p, -2)[-2:]
+    return float(first / (first + second))
 
 
 def _confidence(
     rhythm_logits: NDArray, pitch_logits: NDArray, rhythm_token: str, pitch_token: str
 ) -> float:
-    """Probability of the chosen tokens: the rhythm, and the pitch if the symbol has one."""
-    result = _softmax_max(rhythm_logits)
-    if rhythm_token.startswith("note") and pitch_token not in ("nonote", "[PAD]"):
-        result = min(result, _softmax_max(pitch_logits))
+    """How sure the decoder is of the symbol: its rhythm, and its pitch if it has one."""
+    result = _top2_ratio(rhythm_logits)
+    if rhythm_token.startswith("note") and pitch_token not in (".", "_"):
+        result = min(result, _top2_ratio(pitch_logits))
     return result
 
 
