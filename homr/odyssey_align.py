@@ -15,6 +15,7 @@ import numpy as np
 from homr.bounding_boxes import RotatedBoundingBox
 from homr.model import Staff
 from homr.odyssey_glyphs import PageInk, find_rest_candidates, rest_fits, rest_kind
+from homr.odyssey_glyphs import find_hairpins as find_page_hairpins
 from homr.point_mapping import PointMapping
 from homr.transformer.vocabulary import EncodedSymbol, empty, nonote
 from homr.type_definitions import NDArray
@@ -148,7 +149,11 @@ class OdysseyContext:
             self._snap_notes(half_symbols, half, geometry, to_input)
             self._snap_bars(half_symbols, geometry)
             self._snap_rests(half_symbols, geometry)
-            if self.ink is not None:
+            if self.page is not None:
+                geometry.hairpins = find_page_hairpins(
+                    self.page, geometry.line_ys, geometry.unit, geometry.x_min, geometry.x_max
+                )
+            elif self.ink is not None:
                 geometry.hairpins = find_hairpins(self.ink, geometry)
             self.geometry.append(geometry)
         for symbol in symbols:
@@ -259,19 +264,26 @@ class OdysseyContext:
             for m, c in align(xs, [c.x for c in between], u, fits).items():
                 symbols[members[m]].image_coordinates = (float(between[c].x), float(geometry.line_ys[2]))
                 symbols[members[m]].snapped = True
+        # A rest that touches a staff line or a stem is part of a bigger piece of ink and no
+        # candidate: look for it between its neighbours the older way before giving up on it.
+        if any(not symbols[i].snapped for i in rests):
+            self._snap_rests_by_blobs(symbols, geometry, only=[i for i in rests if not symbols[i].snapped])
 
-    def _snap_rests_by_blobs(self, symbols: list[EncodedSymbol], geometry: StaffGeometry) -> None:
+    def _snap_rests_by_blobs(
+        self, symbols: list[EncodedSymbol], geometry: StaffGeometry, only: list[int] | None = None
+    ) -> None:
         """
         The older method, kept for use without a `PageInk`. Rests have no detector, so look for them in the scan: between the rest's neighbours
         that have a position, remove the staff lines, mask the neighbouring notes (with their
         accidentals, stems, flags and dots) and take the remaining blob of ink.
         """
-        if self.ink is None:
+        ink = self.page.ink if self.page is not None else self.ink
+        if ink is None:
             return
         u = geometry.unit
         top = int(geometry.line_ys[0] - u)
         bottom = int(geometry.line_ys[-1] + u) + 1
-        band = _without_staff_lines(self.ink, geometry, top, bottom)
+        band = _without_staff_lines(ink, geometry, top, bottom)
         width = band.shape[1]
 
         known = [
@@ -289,7 +301,11 @@ class OdysseyContext:
                 hi = x + 1.9 * u
             excluded[max(int(lo), 0) : max(int(hi) + 1, 0)] = True
 
-        rests = [i for i, s in enumerate(symbols) if s.rhythm.startswith("rest") and not s.rhythm.endswith("m")]
+        rests = [
+            i
+            for i, s in enumerate(symbols)
+            if s.rhythm.startswith("rest") and not s.rhythm.endswith("m") and (only is None or i in only)
+        ]
         # group consecutive rests that lie between the same two positioned symbols
         groups: dict[tuple[int, int], list[int]] = {}
         for i in rests:
