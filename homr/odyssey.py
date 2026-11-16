@@ -23,8 +23,56 @@ from homr.system_repair import repair_systems
 from homr.transformer.configs import Config
 
 
-# Per system, (top, bottom, slot) of each stave in the pixels of the input image
+# Per system, (top, bottom, slot) of each stave in the pixels of the input image; slot -1 = a stave to ignore
 PageTemplate = list[list[tuple[float, float, int]]]
+IGNORE = -1
+
+
+@dataclass
+class LayoutStaff:
+    """One five-line staff as Odyssey's layout pass shows it, in the pixels of the input image."""
+
+    line_ys: list[float]
+    x_start: float
+    x_end: float
+
+
+def detect_layout(image_path: str) -> list[list[LayoutStaff]]:
+    """
+    The staffs of a page grouped into systems, top to bottom, by homr's own detection and
+    grouping model. Odyssey shows these for the user to assign parts to, so the template the
+    user makes refers to exactly the staffs that run_page will find. A grand staff is returned
+    as its two staffs.
+    """
+    config = _processing_config()
+    single = homr_main.detect_single_staffs(image_path, config)
+    systems = homr_main.group_staffs(single.predictions, single.staffs)
+    systems = repair_systems(single.debug, systems)
+    single.debug.clean_debug_files_from_previous_runs()
+    result = []
+    for system in sorted(systems, key=lambda m: m.staffs[0].min_y):
+        staffs: list[LayoutStaff] = []
+        for staff in system.staffs:
+            halves = [staff]
+            if staff.is_grandstaff:
+                split = staff.split()
+                if split is not None:
+                    halves = list(split)
+            for half in halves:
+                staffs.append(_layout_staff(half, single.to_input_image))
+        result.append(sorted(staffs, key=lambda s: s.line_ys[0]))
+    return result
+
+
+def _layout_staff(staff: Staff, to_input) -> LayoutStaff:  # noqa: ANN001
+    lines = len(staff.grid[0].y)
+    points = [[to_input((p.x, p.y[i])) for p in staff.grid] for i in range(lines)]
+    xs = [x for x, _ in points[0]]
+    return LayoutStaff(
+        line_ys=[float(np.mean([y for _, y in line])) for line in points],
+        x_start=float(min(xs)),
+        x_end=float(max(xs)),
+    )
 
 
 @dataclass
@@ -134,7 +182,8 @@ def _group_by_template(
                 continue
             _, i, st = min(candidates, key=lambda c: c[0])
             used.add(i)
-            members.setdefault(slot, []).append(st)
+            if slot != IGNORE:
+                members.setdefault(slot, []).append(st)
         if not members:
             continue
         row: list[tuple[Staff, int]] = []
@@ -153,5 +202,7 @@ def _group_by_template(
     if not rows:
         return None
     if len(used) < len(staffs):
-        eprint("The template doesn't cover", len(staffs) - len(used), "staffs; they are ignored")
+        # never drop music the template doesn't know about: read the page with homr's own grouping
+        eprint("The template doesn't cover", len(staffs) - len(used), "staffs; using homr's own grouping")
+        return None
     return rows, slots
