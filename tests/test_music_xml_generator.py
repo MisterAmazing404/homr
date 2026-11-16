@@ -297,6 +297,32 @@ barline . . . . ."""
         self.assertEqual(_times(xml), [("2", "2")])
         self.assertEqual(last_time_signatures(xml), [("2", "2")])
 
+    def test_inferred_and_continued_time_signatures_are_marked_unprinted(self) -> None:
+        """An inferred or continued metre is kept in the XML but isn't one the page prints."""
+        tokens = read_token_lines(self._PAGE_WITHOUT_TIME_SIGNATURE.splitlines())
+        for inherited in (None, [("2", "2")]):
+            xml = generate_xml(XmlGeneratorArguments(), [tokens], "", inherited)
+            time = xml.find("part/measure/attributes/time")
+            assert time is not None
+            self.assertEqual(time.get("print-object"), "no")
+
+    def test_printed_time_signature_has_no_print_object(self) -> None:
+        printed = """clef_G2 . . . . upper
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+note_2. C4 _ _ _ upper
+barline . . . . ."""
+        xml = generate_xml(XmlGeneratorArguments(), [read_token_lines(printed.splitlines())], "")
+        time = xml.find("part/measure/attributes/time")
+        assert time is not None
+        self.assertIsNone(time.get("print-object"))
+
+    def test_unprinted_time_signature_is_still_carried_to_the_next_page(self) -> None:
+        tokens = read_token_lines(self._PAGE_WITHOUT_TIME_SIGNATURE.splitlines())
+        first = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        second = generate_xml(XmlGeneratorArguments(), [tokens], "", last_time_signatures(first))
+        self.assertEqual(_times(second), _times(first))
+
     def test_time_signature_is_estimated_without_a_previous_page(self) -> None:
         tokens = read_token_lines(self._PAGE_WITHOUT_TIME_SIGNATURE.splitlines())
         xml = generate_xml(XmlGeneratorArguments(), [tokens], "")

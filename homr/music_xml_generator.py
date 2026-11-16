@@ -456,7 +456,10 @@ def build_measures(
         stop_octave_shifts(measures[-1], state)
     # A clef opens a second attributes element, so look at the whole first measure
     if measures[0].find("attributes/time") is None:
-        time_el = ET.SubElement(first_attributes, "time")
+        # A time signature that isn't printed on the page (inferred from the bar
+        # lengths, or continued from the previous page) is kept, because the bar lengths and
+        # Sibelius need the metre, but marked print-object="no" so it isn't drawn as if read.
+        time_el = ET.SubElement(first_attributes, "time", attrib={"print-object": "no"})
         if inherited_time is not None:
             beats_text, beat_type = inherited_time
         else:
