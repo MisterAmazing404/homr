@@ -39,6 +39,7 @@ from homr.music_xml_generator import (
     ODYSSEY_SYMBOL_ATTRIBUTE,
 )
 from homr.odyssey_align import StaffGeometry
+from homr.odyssey_boxes import box_to_json
 from homr.transformer.vocabulary import EncodedSymbol, empty, nonote
 
 FORMAT = "odyssey-homr-payload"
@@ -153,6 +154,7 @@ def _symbol_json(
         "position": symbol.position,
         "x": _round(x),
         "y": _round(y),
+        "box": box_to_json(symbol.odyssey_box) if symbol.odyssey_box is not None else None,
         "confidence": None if symbol.confidence is None else round(float(symbol.confidence), 3),
         "snapped": bool(symbol.snapped),
         "system": symbol.odyssey_system,
@@ -175,6 +177,9 @@ def build_payload(
             barline = symbols.get(measure["barline"]) if measure["barline"] else None
             snapped = barline is not None and barline.snapped and barline.image_coordinates is not None
             measure["bar_x"] = _round(barline.image_coordinates[0]) if snapped else None  # type: ignore[union-attr, index]
+            measure["bar_box"] = (
+                box_to_json(barline.odyssey_box) if snapped and barline is not None and barline.odyssey_box is not None else None
+            )
     return {
         "format": FORMAT,
         "version": VERSION,

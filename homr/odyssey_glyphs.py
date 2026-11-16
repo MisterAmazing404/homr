@@ -370,7 +370,7 @@ def _pair(a: _Arm, b: _Arm, u: float) -> dict | None:
     if (a.y_at(left) - b.y_at(left)) * (a.y_at(right) - b.y_at(right)) < 0 and min(gap_left, gap_right) > 0.45 * u:
         return None  # they cross inside the span: an X, not a wedge
     kind = "crescendo" if gap_left < gap_right else "diminuendo"
-    closed = 0.8 * u
+    closed = 0.45 * u
     return {
         "type": kind,
         "x0": float(left),

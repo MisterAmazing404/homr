@@ -226,8 +226,9 @@ class OdysseyContext:
         xs = [s.image_coordinates[0] if s.image_coordinates else None for s in notes]
         matches = align(xs, [c[0] for c in candidates], geometry.unit)
         for i, j in matches.items():
-            notes[i].image_coordinates = (float(candidates[j][0]), float(candidates[j][1]))
-            notes[i].odyssey_box = box_of_detection(heads[j].box, to_input)
+            box = box_of_detection(heads[j].box, to_input)
+            notes[i].odyssey_box = box
+            notes[i].image_coordinates = (box[0] + box[2] / 2, box[1] + box[3] / 2)
             notes[i].snapped = True
         # a note with no notehead found where it should be is more likely a misreading
         for note in notes:
@@ -294,7 +295,14 @@ class OdysseyContext:
                 return kind is not None and rest_fits(kind, between[c].w / u, between[c].h / u)
 
             for m, c in align(xs, [c.x for c in between], u, fits).items():
-                symbols[members[m]].image_coordinates = (float(between[c].x), float(geometry.line_ys[2]))
+                cand = between[c]
+                symbols[members[m]].image_coordinates = (float(cand.x), float(geometry.line_ys[2]))
+                symbols[members[m]].odyssey_box = (
+                    float(cand.x - cand.w / 2),
+                    float(cand.y - cand.h / 2),
+                    float(cand.w),
+                    float(cand.h),
+                )
                 symbols[members[m]].snapped = True
         # A rest that touches a staff line or a stem is part of a bigger piece of ink and no
         # candidate: look for it between its neighbours the older way before giving up on it.
