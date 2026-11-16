@@ -786,8 +786,17 @@ barline . . . . .""".splitlines())
 
         notes = list(xml.iter("note"))
         comments = [[c.text for c in n if c.tag is ET.Comment] for n in notes]  # type: ignore[comparison-overlap]
-        self.assertEqual(comments, [[" imgpos: 45, 231 ", " odyssey: snap=0 "], []])
+        self.assertEqual(comments, [[" imgpos: 45, 231 "], []])
         self.assertIn("<!-- imgpos: 45, 231 -->", ET.tostring(xml, encoding="unicode"))
+
+    def test_image_position_comment_can_be_turned_off(self) -> None:
+        tokens = read_token_lines("""clef_G2 . . . . upper
+note_4 E4 _ _ _ upper
+barline . . . . .""".splitlines())
+        tokens[1].image_coordinates = (45.4, 230.6)
+        xml = generate_xml(XmlGeneratorArguments(image_positions=False), [tokens], "")
+
+        self.assertNotIn("<!--", ET.tostring(xml, encoding="unicode"))
 
     def test_dynamics_single_staff(self) -> None:
         tokens = read_token_lines("""clef_G2 . . . . upper

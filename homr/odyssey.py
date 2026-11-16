@@ -1,14 +1,16 @@
-"""Odyssey entry point: run homr on one page and return MusicXML plus positions.
+"""Odyssey entry point: run homr on one page and return MusicXML plus a payload.
 
-The MusicXML carries `imgpos` and `odyssey` comments on notes and `odyssey-bar` comments on
-measures (see music_xml_generator.py). The staff geometry is returned separately because
-it has no home in MusicXML.
+The MusicXML is plain: it is the way the notation reaches music21, which builds the score
+from it. Everything else Odyssey needs (positions, confidence, snapping, system and part,
+staff lines, barlines, and where each symbol is in the MusicXML) is in the payload, a
+JSON-serialisable dict described in homr.odyssey_payload.
 """
 
 import xml.etree.ElementTree as ET
 
 import cv2
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -16,6 +18,7 @@ from homr import main as homr_main
 from homr.model import MultiStaff, Staff
 from homr.music_xml_generator import TimeSignature, XmlGeneratorArguments, generate_xml
 from homr.odyssey_align import OdysseyContext, StaffGeometry
+from homr.odyssey_payload import build_payload
 from homr.onnx_providers import coreml_available, cuda_available, rocm_available
 from homr.simple_logging import eprint
 from homr.staff_parsing import parse_staffs
@@ -78,6 +81,7 @@ def _layout_staff(staff: Staff, to_input) -> LayoutStaff:  # noqa: ANN001
 @dataclass
 class PageResult:
     musicxml: str
+    payload: dict[str, Any]  # see homr.odyssey_payload
     geometry: list[StaffGeometry]
     last_times: list[TimeSignature | None]
 
@@ -131,7 +135,8 @@ def run_page(
 
     transformer_config = Config()
     transformer_config.use_gpu_inference = config.transformer_use_gpu
-    context = OdysseyContext(single.bar_lines, cv2.imread(image_path, cv2.IMREAD_GRAYSCALE))
+    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    context = OdysseyContext(single.bar_lines, image)
     voices = parse_staffs(
         single.debug,
         multi_staffs,
@@ -143,12 +148,14 @@ def run_page(
         slots=slots,
         slot_is_grandstaff=tuple(slot_is_grandstaff) if slots is not None and slot_is_grandstaff else None,
     )
-    xml = generate_xml(XmlGeneratorArguments(False, None, None), voices, "", inherited_times)
+    xml = generate_xml(XmlGeneratorArguments(False, None, None, image_positions=False), voices, "", inherited_times)
     single.debug.clean_debug_files_from_previous_runs()
     from homr.music_xml_generator import last_time_signatures  # noqa: PLC0415
 
+    payload = build_payload(xml, context.symbols, context.geometry, (image.shape[1], image.shape[0]))
     return PageResult(
         musicxml=ET.tostring(xml, encoding="unicode"),
+        payload=payload,
         geometry=context.geometry,
         last_times=last_time_signatures(xml),
     )

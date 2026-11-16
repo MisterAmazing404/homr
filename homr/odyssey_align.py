@@ -36,9 +36,11 @@ class StaffGeometry:
     bars: list[float] = field(default_factory=list)  # detected barline x positions, sorted
     # hairpins below the staff: {"type": "crescendo" | "diminuendo", "x0", "x1", "y", "open_start", "open_end"}
     hairpins: list[dict] = field(default_factory=list)
+    id: str = ""  # "<system>.<part>.<half>", the prefix of the ids of the symbols on this staff
 
     def to_json(self) -> dict:
         return {
+            "id": self.id,
             "system": self.system,
             "part": self.part,
             "half": self.half,
@@ -105,6 +107,8 @@ class OdysseyContext:
         """`image` is the page as the user supplied it, grayscale; it is used to find rests."""
         self.bar_lines = bar_lines
         self.geometry: list[StaffGeometry] = []
+        # every symbol read from the page by its payload id, for homr.odyssey_payload
+        self.symbols: dict[str, EncodedSymbol] = {}
         self.ink = image < 128 if image is not None else None
 
     def annotate(
@@ -130,7 +134,12 @@ class OdysseyContext:
             self._snap_rests(half_symbols, geometry)
             if self.ink is not None:
                 geometry.hairpins = find_hairpins(self.ink, geometry)
+            geometry.id = f"{system}.{part}.{half_no}"
             self.geometry.append(geometry)
+            for index, symbol in enumerate(half_symbols):
+                symbol.odyssey_half = half_no
+                symbol.odyssey_id = f"{geometry.id}.{index}"
+                self.symbols[symbol.odyssey_id] = symbol
         for symbol in symbols:
             symbol.odyssey_system = system
             symbol.odyssey_part = part
