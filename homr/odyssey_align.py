@@ -22,7 +22,6 @@ from homr.type_definitions import NDArray
 _GAP_COST = 1.0
 _MAX_MATCH_COST = 1.5
 UNMATCHED_PENALTY = 0.6
-_REST_REACH = 8.0  # staff spaces: how far from the transformer's position a rest may be found
 
 
 @dataclass
@@ -255,8 +254,7 @@ class OdysseyContext:
 
             def fits(m: int, c: int, members=members, xs=xs, between=between) -> bool:  # noqa: ANN001
                 kind = rest_kind(symbols[members[m]].rhythm)
-                near = xs[m] is None or abs(xs[m] - between[c].x) <= _REST_REACH * u
-                return kind is not None and near and rest_fits(kind, between[c].w / u, between[c].h / u)
+                return kind is not None and rest_fits(kind, between[c].w / u, between[c].h / u)
 
             for m, c in align(xs, [c.x for c in between], u, fits).items():
                 symbols[members[m]].image_coordinates = (float(between[c].x), float(geometry.line_ys[2]))

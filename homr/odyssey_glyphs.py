@@ -98,23 +98,20 @@ class PageInk:
     # -- the ink that is left once the staff lines are gone
 
     def glyphs(self, unit: float) -> NDArray:
-        """Ink without the staff lines (kept where something crosses a line)."""
+        """
+        Ink without the staff lines. A line is what Homr's staff mask marks, or a long horizontal
+        run of ink, as long as it is thin: where ink is thicker than a line (a stem or a rest
+        crossing it, a beam) it is not a line and stays.
+        """
         if self._glyphs is None:
-            ink = self.ink
-            thickness = max(2, int(round(0.2 * unit)))
-            lines = cv2.dilate(self.staff.astype(np.uint8), np.ones((3, 1), np.uint8)) > 0
-            lines &= ~self.homr
-            above = np.zeros_like(ink)
-            below = np.zeros_like(ink)
-            above[thickness + 1 :] = ink[: -(thickness + 1)]
-            below[: -(thickness + 1)] = ink[thickness + 1 :]
-            crossed = above | below
-            # a line pixel is a line unless ink continues above or below it (a glyph crossing it)
-            # but a thick ink run (beam, rest bar) is not a line
-            self._glyphs = ink & ~(lines & ~crossed)
-            self._glyphs = cv2.morphologyEx(
-                self._glyphs.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 1), np.uint8)
-            ).astype(bool)
+            ink = self.ink.astype(np.uint8)
+            thick = max(3, int(round(0.4 * unit)))
+            long_run = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((1, max(3, int(2.5 * unit))), np.uint8))
+            on_line = (long_run > 0) | (cv2.dilate(self.staff.astype(np.uint8), np.ones((3, 1), np.uint8)) > 0)
+            thick_ink = cv2.morphologyEx(ink, cv2.MORPH_OPEN, np.ones((thick, 1), np.uint8))
+            thick_ink = cv2.dilate(thick_ink, np.ones((3, 1), np.uint8)) > 0
+            glyphs = self.ink & ~(on_line & ~thick_ink)
+            self._glyphs = cv2.morphologyEx(glyphs.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 1), np.uint8)).astype(bool)
         return self._glyphs
 
     def components(self, unit: float) -> tuple[NDArray, NDArray, NDArray]:
