@@ -4,7 +4,7 @@ import os
 import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 import cv2
@@ -271,6 +271,7 @@ class SingleStaffs:
     to_input_image: PointMapping
     staffs: list[Staff]
     notes: list[Note]
+    bar_lines: list[RotatedBoundingBox] = field(default_factory=list)
 
 
 def detect_single_staffs(image_path: str, config: ProcessingConfig) -> SingleStaffs:
@@ -328,7 +329,7 @@ def detect_single_staffs(image_path: str, config: ProcessingConfig) -> SingleSta
     notes = add_notes_to_staffs(
         staffs, noteheads_with_stems, predictions.symbols, predictions.notehead
     )
-    return SingleStaffs(predictions, debug, to_input_image, staffs, notes)
+    return SingleStaffs(predictions, debug, to_input_image, staffs, notes, bar_line_boxes)
 
 
 def group_staffs(predictions: InputPredictions, staffs: list[Staff]) -> list[MultiStaff]:

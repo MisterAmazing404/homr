@@ -133,6 +133,9 @@ class ScoreDecoder:
             if rhythm_sample[0][0] == self.eos_token:
                 break
 
+            symbol_confidence = _confidence(
+                rhythmsp[:, -1, :], pitchsp[:, -1, :], rhythm_token[0], pitch_token[0]
+            )
             symbol = EncodedSymbol(
                 rhythm=rhythm_token[0],
                 pitch=pitch_token[0],
@@ -142,6 +145,7 @@ class ScoreDecoder:
                 position=position_token[0],
                 coordinates=attention,
             )
+            symbol.confidence = symbol_confidence
             symbols.append(symbol)
 
             out_lift = np.concatenate((out_lift, lift_sample), axis=-1)
@@ -178,6 +182,22 @@ class ScoreDecoder:
             input_names.append(f"cache_in{i}")
             output_names.append(f"cache_out{i}")
         return cache, input_names, output_names
+
+
+def _softmax_max(logits: NDArray) -> float:
+    shifted = logits.astype(np.float64) - np.max(logits)
+    exp = np.exp(shifted)
+    return float(exp.max() / exp.sum())
+
+
+def _confidence(
+    rhythm_logits: NDArray, pitch_logits: NDArray, rhythm_token: str, pitch_token: str
+) -> float:
+    """Probability of the chosen tokens: the rhythm, and the pitch if the symbol has one."""
+    result = _softmax_max(rhythm_logits)
+    if rhythm_token.startswith("note") and pitch_token not in ("nonote", "[PAD]"):
+        result = min(result, _softmax_max(pitch_logits))
+    return result
 
 
 def detokenize(tokens: NDArray, vocab: dict[int, str]) -> list[str]:

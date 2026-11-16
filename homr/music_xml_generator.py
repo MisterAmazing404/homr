@@ -388,6 +388,10 @@ def build_measures(
             if rhythm != "barline" and ending_measure is not None:
                 barline = build_or_get_barline(ending_measure, "right")
                 build_barline_style(symbol, barline)
+            if ending_measure is not None and symbol.snapped and symbol.image_coordinates is not None:
+                ending_measure.append(
+                    ET.Comment(f" odyssey-bar: {round(symbol.image_coordinates[0])} ")
+                )
             if ending_measure is current_measure:
                 close_current_measure()
                 measure_number += 1
@@ -1356,6 +1360,20 @@ def build_image_position(xml: ET.Element, symbol: EncodedSymbol) -> None:
         return
     x, y = symbol.image_coordinates
     xml.append(ET.Comment(f" imgpos: {round(x)}, {round(y)} "))
+    build_odyssey_meta(xml, symbol)
+
+
+def build_odyssey_meta(xml: ET.Element, symbol: EncodedSymbol) -> None:
+    """Odyssey: confidence, snapping and origin (system, part) of a symbol as a comment."""
+    fields = []
+    if symbol.confidence is not None:
+        fields.append(f"conf={symbol.confidence:.3f}")
+    fields.append(f"snap={int(symbol.snapped)}")
+    if symbol.odyssey_system is not None:
+        fields.append(f"sys={symbol.odyssey_system}")
+    if symbol.odyssey_part is not None:
+        fields.append(f"part={symbol.odyssey_part}")
+    xml.append(ET.Comment(" odyssey: " + " ".join(fields) + " "))
 
 
 def build_multi_measure_rest(symbol: EncodedSymbol, attributes: ET.Element) -> int:

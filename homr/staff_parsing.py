@@ -8,6 +8,7 @@ from homr import constants
 from homr.debug import Debug
 from homr.image_utils import crop_image_and_return_new_top
 from homr.model import MultiStaff, Staff
+from homr.odyssey_align import OdysseyContext
 from homr.point_mapping import PointMapping, chain, identity, undo_crop, undo_resize
 from homr.simple_logging import eprint
 from homr.staff_dewarping import StaffDewarping, dewarp_staff_image
@@ -348,6 +349,7 @@ def parse_staffs(
     config: Config,
     selected_staff: int = -1,
     page_to_input_image: PointMapping = identity,
+    odyssey: OdysseyContext | None = None,
 ) -> list[list[EncodedSymbol]]:
     """
     Dewarps each staff and then runs it through an algorithm which extracts
@@ -390,6 +392,8 @@ def parse_staffs(
             if len(result_staff) == 0:
                 eprint("Skipping empty staff", i - 1)
                 continue
+            if odyssey is not None:
+                odyssey.annotate(result_staff, staff, staff_index, voice, page_to_input_image)
             results[(staff_index, voice)] = result_staff
 
     voices = []

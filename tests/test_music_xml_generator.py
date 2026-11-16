@@ -786,7 +786,7 @@ barline . . . . .""".splitlines())
 
         notes = list(xml.iter("note"))
         comments = [[c.text for c in n if c.tag is ET.Comment] for n in notes]  # type: ignore[comparison-overlap]
-        self.assertEqual(comments, [[" imgpos: 45, 231 "], []])
+        self.assertEqual(comments, [[" imgpos: 45, 231 ", " odyssey: snap=0 "], []])
         self.assertIn("<!-- imgpos: 45, 231 -->", ET.tostring(xml, encoding="unicode"))
 
     def test_dynamics_single_staff(self) -> None:

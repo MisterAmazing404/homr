@@ -458,6 +458,12 @@ class EncodedSymbol:
         self.coordinates = coordinates
         # The coordinates mapped back to the image which was given to homr as input
         self.image_coordinates: tuple[float, float] | None = None
+        # Odyssey: the decoder's probability for this symbol (0..1) and where it was found
+        self.confidence: float | None = None
+        self.odyssey_system: int | None = None
+        self.odyssey_part: int | None = None
+        # True if image_coordinates were snapped to a detected notehead/rest/barline
+        self.snapped: bool = False
         self._duration: SymbolDuration | None = None
 
     def is_tuplet(self) -> bool:
