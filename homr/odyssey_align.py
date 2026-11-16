@@ -6,6 +6,7 @@ barlines exactly, but doesn't know which token they belong to. Both sequences ru
 right, so we align them (edit distance) and take the detected position for matched symbols.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import cv2
@@ -14,6 +15,8 @@ import numpy as np
 from homr.bounding_boxes import RotatedBoundingBox
 from homr.model import Note, Staff
 from homr.odyssey_boxes import Box, box_of_detection, box_to_json
+from homr.odyssey_glyphs import PageInk, find_rest_candidates, rest_fits, rest_kind
+from homr.odyssey_glyphs import find_hairpins as find_page_hairpins
 from homr.point_mapping import PointMapping
 from homr.transformer.vocabulary import EncodedSymbol, empty, nonote
 from homr.type_definitions import NDArray
@@ -69,10 +72,16 @@ class StaffGeometry:
         }
 
 
-def align(symbol_xs: list[float | None], candidate_xs: list[float], unit: float) -> dict[int, int]:
+def align(
+    symbol_xs: list[float | None],
+    candidate_xs: list[float],
+    unit: float,
+    allowed: Callable[[int, int], bool] | None = None,
+) -> dict[int, int]:
     """
     Minimum cost monotonic matching of symbols to detections.
-    Returns {symbol index: candidate index} for the matched pairs.
+    Returns {symbol index: candidate index} for the matched pairs. `allowed(i, j)` rules out
+    pairs that can't belong together (a rest token and a piece of ink that isn't its shape).
     """
     n, m = len(symbol_xs), len(candidate_xs)
     if n == 0 or m == 0:
@@ -80,6 +89,8 @@ def align(symbol_xs: list[float | None], candidate_xs: list[float], unit: float)
     scale = 8.0 * max(unit, 1.0)
 
     def match_cost(i: int, j: int) -> float:
+        if allowed is not None and not allowed(i, j):
+            return 2 * _GAP_COST + 1  # never better than leaving both unmatched
         x = symbol_xs[i]
         if x is None:
             return 0.5
@@ -119,12 +130,22 @@ def _is_lower(symbol: EncodedSymbol) -> bool:
 class OdysseyContext:
     """Collects staff geometry and snaps symbol positions while homr parses a page."""
 
-    def __init__(self, bar_lines: list[RotatedBoundingBox], image: NDArray | None = None) -> None:
-        """`image` is the page as the user supplied it, grayscale; it is used to find rests."""
+    def __init__(
+        self,
+        bar_lines: list[RotatedBoundingBox],
+        image: NDArray | None = None,
+        page: PageInk | None = None,
+    ) -> None:
+        """
+        `image` is the page as the user supplied it, grayscale. `page` is that image with Homr's
+        segmentation taken away (odyssey_glyphs); rests and hairpins are found in it. Without it
+        the rests and hairpins are found by the older image-only methods, which need `image`.
+        """
         self.bar_lines = bar_lines
         self.geometry: list[StaffGeometry] = []
         # every symbol read from the page by its payload id, for homr.odyssey_payload
         self.symbols: dict[str, EncodedSymbol] = {}
+        self.page = page
         self.ink = image < 128 if image is not None else None
 
     def annotate(
@@ -148,7 +169,11 @@ class OdysseyContext:
             self._snap_notes(half_symbols, half, geometry, to_input)
             self._snap_bars(half_symbols, geometry)
             self._snap_rests(half_symbols, geometry)
-            if self.ink is not None:
+            if self.page is not None:
+                geometry.hairpins = find_page_hairpins(
+                    self.page, geometry.line_ys, geometry.unit, geometry.x_min, geometry.x_max
+                )
+            elif self.ink is not None:
                 geometry.hairpins = find_hairpins(self.ink, geometry)
             geometry.id = f"{system}.{part}.{half_no}"
             self.geometry.append(geometry)
@@ -221,16 +246,76 @@ class OdysseyContext:
 
     def _snap_rests(self, symbols: list[EncodedSymbol], geometry: StaffGeometry) -> None:
         """
-        Rests have no detector, so look for them in the scan: between the rest's neighbours
+        Homr's segmentation has no rest class, but the transformer reads every rest and says
+        roughly where it is. The page with everything Homr recognised taken away (`PageInk`) leaves
+        the rests standing alone in the staff; each rest token is matched to one of them with the
+        same monotonic alignment as the noteheads (shape and position decide), between the
+        symbols already snapped on either side of it. A rest that finds no match keeps the
+        transformer's position and stays unsnapped: that is where Homr gives us no better signal.
+        """
+        if self.page is None:
+            self._snap_rests_by_blobs(symbols, geometry)
+            return
+        u = geometry.unit
+        candidates = find_rest_candidates(
+            self.page, geometry.line_ys, u, geometry.x_min, geometry.x_max
+        )
+        # time signature numerals aren't in Homr's masks; the transformer says where they are
+        header = [
+            s.image_coordinates[0]
+            for s in symbols
+            if s.rhythm.startswith("timeSignature") and s.image_coordinates
+        ]
+        candidates = [c for c in candidates if all(abs(c.x - x) > 2.5 * u for x in header)]
+        known = [
+            (i, s) for i, s in enumerate(symbols) if s.snapped and s.image_coordinates is not None
+        ]
+        rests = [
+            i for i, s in enumerate(symbols) if s.rhythm.startswith("rest") and rest_kind(s.rhythm)
+        ]
+        groups: dict[tuple[int, int], list[int]] = {}
+        for i in rests:
+            before = max((k for k, _ in known if k < i), default=-1)
+            after = min((k for k, _ in known if k > i), default=-1)
+            groups.setdefault((before, after), []).append(i)
+        for (before, after), members in groups.items():
+            left = symbols[before].image_coordinates[0] if before >= 0 else geometry.x_min  # type: ignore[index]
+            right = symbols[after].image_coordinates[0] if after >= 0 else geometry.x_max  # type: ignore[index]
+            between = [c for c in candidates if left + 0.25 * u < c.x < right - 0.25 * u]
+            if not between:
+                continue
+            xs = [
+                symbols[i].image_coordinates[0] if symbols[i].image_coordinates else None
+                for i in members
+            ]
+
+            def fits(m: int, c: int, members=members, xs=xs, between=between) -> bool:  # noqa: ANN001
+                kind = rest_kind(symbols[members[m]].rhythm)
+                return kind is not None and rest_fits(kind, between[c].w / u, between[c].h / u)
+
+            for m, c in align(xs, [c.x for c in between], u, fits).items():
+                symbols[members[m]].image_coordinates = (float(between[c].x), float(geometry.line_ys[2]))
+                symbols[members[m]].snapped = True
+        # A rest that touches a staff line or a stem is part of a bigger piece of ink and no
+        # candidate: look for it between its neighbours the older way before giving up on it.
+        if any(not symbols[i].snapped for i in rests):
+            self._snap_rests_by_blobs(symbols, geometry, only=[i for i in rests if not symbols[i].snapped])
+
+    def _snap_rests_by_blobs(
+        self, symbols: list[EncodedSymbol], geometry: StaffGeometry, only: list[int] | None = None
+    ) -> None:
+        """
+        The older method, kept for use without a `PageInk`. Rests have no detector, so look for them in the scan: between the rest's neighbours
         that have a position, remove the staff lines, mask the neighbouring notes (with their
         accidentals, stems, flags and dots) and take the remaining blob of ink.
         """
-        if self.ink is None:
+        ink = self.page.ink if self.page is not None else self.ink
+        if ink is None:
             return
         u = geometry.unit
         top = int(geometry.line_ys[0] - u)
         bottom = int(geometry.line_ys[-1] + u) + 1
-        band = _without_staff_lines(self.ink, geometry, top, bottom)
+        band = _without_staff_lines(ink, geometry, top, bottom)
         width = band.shape[1]
 
         known = [
@@ -248,7 +333,11 @@ class OdysseyContext:
                 hi = x + 1.9 * u
             excluded[max(int(lo), 0) : max(int(hi) + 1, 0)] = True
 
-        rests = [i for i, s in enumerate(symbols) if s.rhythm.startswith("rest") and not s.rhythm.endswith("m")]
+        rests = [
+            i
+            for i, s in enumerate(symbols)
+            if s.rhythm.startswith("rest") and not s.rhythm.endswith("m") and (only is None or i in only)
+        ]
         # group consecutive rests that lie between the same two positioned symbols
         groups: dict[tuple[int, int], list[int]] = {}
         for i in rests:
