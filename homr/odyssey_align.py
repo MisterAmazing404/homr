@@ -280,9 +280,11 @@ def _blobs(columns: NDArray, min_height: float, max_width: float, gap: int) -> l
 def find_hairpins(ink: NDArray, geometry: StaffGeometry) -> list[dict]:
     """
     Hairpins (crescendo/diminuendo wedges) below a staff. Homr's model doesn't read them, so
-    find them in the scan: two thin straight lines that overlap horizontally, slope in opposite
-    directions, and are close together at one end and apart at the other. A hairpin cut by a
-    system break is open at both ends; `open_start`/`open_end` say which end is not closed.
+    find them in the scan. Keep the thin strokes (no stems, noteheads, beams), bridge the gaps
+    stems cut into them, and fit straight lines to the top and bottom edge of each stroke. A
+    wedge drawn in one stroke shows two edges that meet; a wedge whose ends don't touch (cut by
+    a system break) shows as two straight lines with opposite slopes, which are paired.
+    `open_start`/`open_end` say which end is not closed.
     """
     u = geometry.unit
     top = int(geometry.line_ys[-1] + 0.35 * u)
@@ -290,83 +292,91 @@ def find_hairpins(ink: NDArray, geometry: StaffGeometry) -> list[dict]:
     x0, x1 = int(max(geometry.x_min - u, 0)), int(min(geometry.x_max + u, ink.shape[1]))
     if bottom - top < 2 * u or x1 - x0 < 6 * u:
         return []
-    region = ink[top:bottom, x0:x1]
-    found = cv2.HoughLinesP(
-        region.astype(np.uint8) * 255, 1, np.pi / 720, threshold=int(2 * u),
-        minLineLength=int(4 * u), maxLineGap=int(0.6 * u),
-    )
-    if found is None:
-        return []
-    lines = []
-    for ax, ay, bx, by in np.asarray(found).reshape(-1, 4):
-        if bx < ax:
-            ax, ay, bx, by = bx, by, ax, ay
-        slope = (by - ay) / max(bx - ax, 1)
-        if not (0.012 < abs(slope) < 0.27) or not _is_thin(region, ax, ay, bx, by, 0.4 * u):
-            continue
-        lines.append((float(ax), float(ay), float(bx), float(by), float(slope)))
-    lines = _merge_collinear(lines, u)
+    thin = _thin_strokes(ink[top:bottom, x0:x1], max_run=max(2, int(0.35 * u)))
+    bridge = cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(0.4 * u)), 1))
+    thin = cv2.morphologyEx(thin.astype(np.uint8), cv2.MORPH_CLOSE, bridge)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(thin, connectivity=8)
 
-    result = []
+    wedges: list[dict] = []
+    lines: list[tuple[float, ...]] = []
+    for c in range(1, count):
+        cx, cy, w, h, _area = stats[c]
+        if w < 4 * u or h > 3.5 * u:
+            continue
+        ys, xs = np.nonzero(labels[cy : cy + h, cx : cx + w] == c)
+        columns = np.unique(xs)
+        upper = np.array([ys[xs == x].min() for x in columns], dtype=float)
+        lower = np.array([ys[xs == x].max() for x in columns], dtype=float)
+        fit_up, res_up = _fit(columns, upper)
+        fit_lo, res_lo = _fit(columns, lower)
+        if res_up > 0.25 * u or res_lo > 0.25 * u:
+            continue  # curved: a slur or a tie
+        left, right = float(columns[0]), float(columns[-1])
+        gap_left = np.polyval(fit_lo, left) - np.polyval(fit_up, left)
+        gap_right = np.polyval(fit_lo, right) - np.polyval(fit_up, right)
+        if max(gap_left, gap_right) > 0.5 * u:
+            if fit_up[0] * fit_lo[0] < 0 and abs(gap_right - gap_left) > 0.3 * u:
+                wedges.append(_wedge(left + cx + x0, right + cx + x0, gap_left, gap_right,
+                                     (np.polyval(fit_up, left) + np.polyval(fit_lo, left)) / 2 + cy + top, u))
+            continue
+        slope = float((fit_up[0] + fit_lo[0]) / 2)
+        if abs(slope) < 0.004 or abs(slope) > 0.27:
+            continue  # level: a ledger or staff line
+        y_left = float((np.polyval(fit_up, left) + np.polyval(fit_lo, left)) / 2)
+        y_right = float((np.polyval(fit_up, right) + np.polyval(fit_lo, right)) / 2)
+        lines.append((left + cx + x0, y_left + cy + top, right + cx + x0, y_right + cy + top, slope))
+
     used: set[int] = set()
     for i, a in enumerate(lines):
         for j, b in enumerate(lines):
             if i >= j or i in used or j in used or a[4] * b[4] >= 0:
                 continue
             left, right = max(a[0], b[0]), min(a[2], b[2])
-            if right - left < 0.7 * min(a[2] - a[0], b[2] - b[0]) or right - left < 4 * u:
+            shorter = min(a[2] - a[0], b[2] - b[0])
+            if right - left < 0.8 * shorter or shorter < 0.7 * max(a[2] - a[0], b[2] - b[0]):
                 continue
             gap_left = abs(_y_at(a, left) - _y_at(b, left))
             gap_right = abs(_y_at(a, right) - _y_at(b, right))
-            if abs(gap_right - gap_left) < 0.5 * u or max(gap_left, gap_right) > 3.5 * u:
+            if abs(gap_right - gap_left) < 0.25 * u or max(gap_left, gap_right) > 3.5 * u:
                 continue
-            closed = 0.45 * u
-            kind = "crescendo" if gap_left < gap_right else "diminuendo"
-            result.append({
-                "type": kind,
-                "x0": left + x0,
-                "x1": right + x0,
-                "y": (_y_at(a, left) + _y_at(b, left)) / 2 + top,
-                "open_start": bool(kind == "diminuendo" or gap_left > closed),
-                "open_end": bool(kind == "crescendo" or gap_right > closed),
-            })
+            wedges.append(_wedge(left, right, gap_left, gap_right, (_y_at(a, left) + _y_at(b, left)) / 2, u))
             used.update((i, j))
-    return sorted(result, key=lambda h: h["x0"])
+    return sorted(wedges, key=lambda h: h["x0"])
+
+
+def _wedge(left: float, right: float, gap_left: float, gap_right: float, y_left: float, u: float) -> dict:
+    kind = "crescendo" if gap_left < gap_right else "diminuendo"
+    closed = 0.45 * u
+    return {
+        "type": kind,
+        "x0": float(left),
+        "x1": float(right),
+        "y": float(y_left),
+        "open_start": bool(kind == "diminuendo" or gap_left > closed),
+        "open_end": bool(kind == "crescendo" or gap_right > closed),
+    }
+
+
+def _fit(xs: NDArray, ys: NDArray) -> tuple[NDArray, float]:
+    """Least-squares line and its largest deviation."""
+    fit = np.polyfit(xs, ys, 1)
+    return fit, float(np.abs(np.polyval(fit, xs) - ys).max())
+
+
+def _thin_strokes(ink: NDArray, max_run: int) -> NDArray:
+    """The ink that is part of a vertical run no longer than `max_run` pixels."""
+    result = np.zeros_like(ink, dtype=bool)
+    height = ink.shape[0]
+    padded = np.vstack([np.zeros((1, ink.shape[1]), dtype=bool), ink, np.zeros((1, ink.shape[1]), dtype=bool)])
+    diff = np.diff(padded.astype(np.int8), axis=0)
+    for x in range(ink.shape[1]):
+        starts = np.where(diff[:, x] == 1)[0]
+        ends = np.where(diff[:, x] == -1)[0]
+        for s0, e0 in zip(starts, ends, strict=True):
+            if e0 - s0 <= max_run:
+                result[s0:min(e0, height), x] = True
+    return result
 
 
 def _y_at(line: tuple[float, ...], x: float) -> float:
     return line[1] + (x - line[0]) * line[4]
-
-
-def _is_thin(region: NDArray, ax: int, ay: int, bx: int, by: int, max_thickness: float) -> bool:
-    """Beams and other thick strokes are not hairpin lines."""
-    for t in (0.2, 0.4, 0.6, 0.8):
-        x = int(ax + (bx - ax) * t)
-        y = int(ay + (by - ay) * t)
-        column = region[:, x]
-        top = y
-        while top > 0 and column[top - 1]:
-            top -= 1
-        bottom = y
-        while bottom < len(column) - 1 and column[bottom + 1]:
-            bottom += 1
-        if bottom - top + 1 > max_thickness:
-            return False
-    return True
-
-
-def _merge_collinear(lines: list[tuple[float, ...]], u: float) -> list[tuple[float, ...]]:
-    """Hough finds a line several times (and in pieces); keep one segment per line."""
-    merged: list[list[float]] = []
-    for line in sorted(lines, key=lambda line: line[0]):
-        for m in merged:
-            same_slope = abs(m[4] - line[4]) < 0.02
-            touching = line[0] <= m[2] + u
-            if same_slope and touching and abs(_y_at(tuple(m), line[0]) - line[1]) < 0.3 * u:
-                if line[2] > m[2]:
-                    m[2], m[3] = line[2], line[3]
-                m[4] = (m[3] - m[1]) / max(m[2] - m[0], 1)
-                break
-        else:
-            merged.append(list(line))
-    return [tuple(m) for m in merged]
