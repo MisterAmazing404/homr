@@ -189,24 +189,36 @@ def _select_grand_staffs(pairs: list[tuple[int, int]], probabilities: NDArray) -
 
 def _merge_grand_staff(upper: Staff, lower: Staff) -> Staff:
     """
-    Staff.merge keeps the x positions which both grids have, as without the model. If
-    they have none, the lower staff is resampled to the grid of the upper one.
+    The two staffs as one grand staff, on every grid x of either staff where both reach,
+    each staff's lines interpolated where its own grid has no point. Staff.merge alone keeps
+    only the x positions both grids have, which leaves gaps wider than the staff tolerance
+    where a scan's staff lines are broken, and notes there are lost (Odyssey: the scanned
+    piano example lost 9 of 22 notes in the full read).
     """
-    common = {round(p.x) for p in upper.grid} & {round(p.x) for p in lower.grid}
-    if len(common) >= 2:  # noqa: PLR2004
-        return upper.merge(lower)
-    points = [p for p in upper.grid if lower.min_x <= p.x <= lower.max_x]
-    if len(points) == 0:
+    lo = max(upper.min_x, lower.min_x)
+    hi = min(upper.max_x, lower.max_x)
+    xs: dict[int, float] = {}
+    for p in upper.grid + lower.grid:
+        if lo <= p.x <= hi:
+            xs.setdefault(round(p.x), p.x)
+    if len(xs) == 0:
         return upper
-    x = np.array([p.x for p in points])
-    lines = np.array([_line_at(lower, line, x) for line in range(len(lower.grid[0].y))])
-    resampled = Staff(
-        [StaffPoint(p.x, [float(y) for y in lines[:, k]], p.angle) for k, p in enumerate(points)]
+    x = np.array(sorted(xs.values()))
+    merged = _resampled(upper, x).merge(_resampled(lower, x))
+    merged.symbols = [*upper.symbols, *lower.symbols]
+    return merged
+
+
+def _resampled(staff: Staff, x: NDArray) -> Staff:
+    """The staff with grid points at exactly the given x, lines and angle interpolated."""
+    lines = np.array([_line_at(staff, line, x) for line in range(len(staff.grid[0].y))])
+    angles = np.interp(x, [p.x for p in staff.grid], [p.angle for p in staff.grid])
+    return Staff(
+        [
+            StaffPoint(float(xk), [float(y) for y in lines[:, k]], float(angles[k]))
+            for k, xk in enumerate(x)
+        ]
     )
-    resampled.symbols = lower.symbols
-    cut = Staff(points)
-    cut.symbols = upper.symbols
-    return cut.merge(resampled)
 
 
 def group_staffs(
