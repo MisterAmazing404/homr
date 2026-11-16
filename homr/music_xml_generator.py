@@ -27,7 +27,8 @@ from homr.transformer.vocabulary import (
 
 
 class ConversionState:
-    def __init__(self, division: int, nominator: Fraction):
+    def __init__(self, division: int, nominator: Fraction, image_positions: bool = True):
+        self.image_positions = image_positions
         self.beats = 4 * constants.duration_of_quarter
         self.division = division
         self.nominator = nominator
@@ -106,8 +107,15 @@ class SymbolChord:
 
 class XmlGeneratorArguments:
     def __init__(
-        self, large_page: bool | None = None, metronome: int | None = None, tempo: int | None = None
+        self,
+        large_page: bool | None = None,
+        metronome: int | None = None,
+        tempo: int | None = None,
+        image_positions: bool = True,
     ):
+        # Write each note's position on the input image as a comment. Odyssey reads the
+        # positions from its payload instead (homr.odyssey_payload) and turns this off.
+        self.image_positions = image_positions
         self.large_page = large_page
         self.metronome = metronome
         self.tempo = tempo
@@ -304,7 +312,7 @@ def build_measures(
 
     groups = split_mixed_chords(add_tuplet_start_stop(group_into_chords(voice)))
     division, nominators = find_division_and_time_signature_nominators(groups)
-    state = ConversionState(division, nominators[0])
+    state = ConversionState(division, nominators[0], args.image_positions)
     # Without a printed time signature at its start, a page continues in the previous
     # page's one: the model reads only the beat type, so an estimate from the measure
     # lengths can't tell 2/2 from 4/4, and would bring a time change at every page.
@@ -388,10 +396,8 @@ def build_measures(
             if rhythm != "barline" and ending_measure is not None:
                 barline = build_or_get_barline(ending_measure, "right")
                 build_barline_style(symbol, barline)
-            if ending_measure is not None and symbol.snapped and symbol.image_coordinates is not None:
-                ending_measure.append(
-                    ET.Comment(f" odyssey-bar: {round(symbol.image_coordinates[0])} ")
-                )
+            if ending_measure is not None and symbol.odyssey_id is not None:
+                ending_measure.set(ODYSSEY_BARLINE_ATTRIBUTE, symbol.odyssey_id)
             if ending_measure is current_measure:
                 close_current_measure()
                 measure_number += 1
@@ -786,6 +792,11 @@ def rebalance_measure_voices(measure: ET.Element) -> None:
                 if voice_el is not None:
                     voice_el.text = xml_voice
 
+
+# Odyssey: temporary attributes naming the payload symbol a <note> was made from and the barline
+# symbol that ended a <measure>. homr.odyssey_payload reads and removes them; they are not MusicXML.
+ODYSSEY_SYMBOL_ATTRIBUTE = "odyssey-symbol"
+ODYSSEY_BARLINE_ATTRIBUTE = "odyssey-barline"
 
 # The position of the model (e.g. upper2) of a note while the part is built
 _POSITION_ATTRIBUTE = "homr-position"
@@ -1349,7 +1360,10 @@ def build_note_or_rest(
     is_tuplet = model_duration.actual_notes != model_duration.normal_notes
     build_articulations(note, model_note.articulation, tuplet_mark if is_tuplet else "", state)
     build_slurs(note, slurs, slur_number)
-    build_image_position(note, model_note)
+    if state.image_positions:
+        build_image_position(note, model_note)
+    if model_note.odyssey_id is not None:
+        note.set(ODYSSEY_SYMBOL_ATTRIBUTE, model_note.odyssey_id)
 
     return note
 
@@ -1363,20 +1377,6 @@ def build_image_position(xml: ET.Element, symbol: EncodedSymbol) -> None:
         return
     x, y = symbol.image_coordinates
     xml.append(ET.Comment(f" imgpos: {round(x)}, {round(y)} "))
-    build_odyssey_meta(xml, symbol)
-
-
-def build_odyssey_meta(xml: ET.Element, symbol: EncodedSymbol) -> None:
-    """Odyssey: confidence, snapping and origin (system, part) of a symbol as a comment."""
-    fields = []
-    if symbol.confidence is not None:
-        fields.append(f"conf={symbol.confidence:.3f}")
-    fields.append(f"snap={int(symbol.snapped)}")
-    if symbol.odyssey_system is not None:
-        fields.append(f"sys={symbol.odyssey_system}")
-    if symbol.odyssey_part is not None:
-        fields.append(f"part={symbol.odyssey_part}")
-    xml.append(ET.Comment(" odyssey: " + " ".join(fields) + " "))
 
 
 def build_multi_measure_rest(symbol: EncodedSymbol, attributes: ET.Element) -> int:

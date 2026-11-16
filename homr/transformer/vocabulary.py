@@ -462,6 +462,11 @@ class EncodedSymbol:
         self.confidence: float | None = None
         self.odyssey_system: int | None = None
         self.odyssey_part: int | None = None
+        # Odyssey: which half of a grand staff (0 upper or only staff, 1 lower) and the symbol's
+        # id in the payload (homr.odyssey_payload); the id is also set on the symbol's note in
+        # the MusicXML while it is generated, so the payload can say where the symbol went
+        self.odyssey_half: int | None = None
+        self.odyssey_id: str | None = None
         # True if image_coordinates were snapped to a detected notehead/rest/barline
         self.snapped: bool = False
         self._duration: SymbolDuration | None = None
