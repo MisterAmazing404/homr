@@ -53,3 +53,20 @@ def chain(*mappings: PointMapping) -> PointMapping:
         return point
 
     return mapping
+
+
+def invert(mapping: PointMapping) -> PointMapping:
+    """
+    The inverse of a mapping which only shifts and scales each axis, which is all that
+    cropping and resizing do. The mappings of the pipeline are inverses by construction
+    (they take points back to the input image), this gives the way forward: from the
+    input image to the image the pipeline works on.
+    """
+    x0, y0 = mapping((0.0, 0.0))
+    scale_x = mapping((1.0, 0.0))[0] - x0
+    scale_y = mapping((0.0, 1.0))[1] - y0
+
+    def inverse(point: Point) -> Point:
+        return (point[0] - x0) / scale_x, (point[1] - y0) / scale_y
+
+    return inverse

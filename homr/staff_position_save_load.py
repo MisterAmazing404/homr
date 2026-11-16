@@ -1,3 +1,4 @@
+import json
 import sys
 import traceback
 
@@ -8,12 +9,121 @@ from homr import constants
 from homr.bounding_boxes import BoundingBox, create_lines
 from homr.debug import Debug
 from homr.model import MultiStaff, Staff, StaffPoint
+from homr.point_mapping import PointMapping, identity
 from homr.simple_logging import eprint
 from homr.staff_detection import detect_staff
 from homr.type_definitions import NDArray
 
+# The staff positions are saved in one of two formats, the file says which:
+#
+# - precise (JSON, what save_staff_positions writes): the staffs of every system with their
+#   full grids and grand staff flags, in the pixels of the image the user supplied. A
+#   later run loads them and doesn't detect or group staffs again.
+# - boxes (text, one line per staff: class, centre x, centre y, width, height, all relative
+#   to the image): the original coarse format. The staffs inside the boxes are
+#   detected again, see load_staff_boxes. Reading it is kept, writing it is save_staff_boxes.
+FORMAT = "homr-staves"
+VERSION = 1
+
 
 def save_staff_positions(
+    multi_staffs: list[MultiStaff],
+    file_path: str,
+    to_input_image: PointMapping = identity,
+    input_shape: tuple[int, ...] = (0, 0),
+) -> None:
+    """
+    Saves the staffs exactly as they are: per system its staffs with every grid point
+    (x, angle and the y of each line), whether it is a grand staff, and whether the staff
+    relation model was sure of the system. to_input_image maps the staffs' coordinates to
+    the image the user supplied, whose numpy shape is input_shape (height, width, ...).
+    """
+    systems = []
+    for multi_staff in multi_staffs:
+        staffs = []
+        for staff in multi_staff.staffs:
+            grid = []
+            for point in staff.grid:
+                mapped = [to_input_image((point.x, y)) for y in point.y]
+                x = float(np.mean([m[0] for m in mapped]))
+                grid.append([x, float(point.angle), *[float(m[1]) for m in mapped]])
+            staffs.append({"grandstaff": bool(staff.is_grandstaff), "grid": grid})
+        systems.append({"certain": bool(multi_staff.certain), "staffs": staffs})
+    data = {
+        "format": FORMAT,
+        "version": VERSION,
+        "image": {"width": int(input_shape[1]), "height": int(input_shape[0])},
+        "systems": systems,
+    }
+    with open(file_path, "w") as file:
+        json.dump(data, file, separators=(",", ":"))
+
+
+def is_precise_staff_positions(file_path: str) -> bool:
+    with open(file_path) as file:
+        return file.read(1) == "{"
+
+
+def load_precise_staff_positions(
+    file_path: str,
+    from_input_image: PointMapping = identity,
+    input_shape: tuple[int, ...] | None = None,
+) -> list[MultiStaff]:
+    """
+    The staffs as save_staff_positions saved them. from_input_image maps the image the
+    user supplied to the one the staffs are wanted in, see point_mapping.invert.
+    input_shape is the shape of the image the user supplied now, it must be the one the
+    staffs were saved for.
+    """
+    with open(file_path) as file:
+        data = json.load(file)
+    if data.get("format") != FORMAT or data.get("version") != VERSION:
+        raise ValueError("Not a staff positions file of this version: " + file_path)
+    saved = data["image"]
+    if input_shape is not None and (
+        saved["width"] != input_shape[1] or saved["height"] != input_shape[0]
+    ):
+        raise ValueError(
+            f"The staffs were saved for an image of {saved['width']}x{saved['height']}, "
+            f"this one is {input_shape[1]}x{input_shape[0]}"
+        )
+    result = []
+    for system in data["systems"]:
+        staffs = []
+        for saved_staff in system["staffs"]:
+            grid = []
+            for x, angle, *ys in saved_staff["grid"]:
+                points = [from_input_image((x, y)) for y in ys]
+                grid.append(
+                    StaffPoint(
+                        float(np.mean([p[0] for p in points])), [p[1] for p in points], angle
+                    )
+                )
+            staff = Staff(grid)
+            staff.is_grandstaff = saved_staff["grandstaff"]
+            staffs.append(staff)
+        result.append(MultiStaff(staffs, [], certain=system["certain"]))
+    return result
+
+
+def load_staff_positions(
+    debug: Debug,
+    image: NDArray,
+    file_path: str,
+    selected_staff: int = -1,
+    from_input_image: PointMapping = identity,
+    input_shape: tuple[int, ...] | None = None,
+) -> list[MultiStaff]:
+    """
+    Loads staff positions in either format. image is the one the staffs are wanted in (only
+    the boxes format needs it, to detect the staffs inside the boxes).
+    """
+    if is_precise_staff_positions(file_path):
+        return load_precise_staff_positions(file_path, from_input_image, input_shape)
+    return load_staff_boxes(debug, image, file_path, selected_staff)
+
+
+def save_staff_boxes(
     multi_staffs: list[MultiStaff], shape: tuple[int, ...], file_path: str
 ) -> None:
     staff_coordinates = []
@@ -42,7 +152,7 @@ def save_staff_positions(
         text_file.writelines(staff_coordinates)
 
 
-def load_staff_positions(
+def load_staff_boxes(
     debug: Debug, image: NDArray, file_path: str, selected_staff: int = -1
 ) -> list[MultiStaff]:
     staffs = []

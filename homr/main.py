@@ -32,10 +32,14 @@ from homr.music_xml_generator import (
     last_time_signatures,
 )
 from homr.noise_filtering import filter_predictions
-from homr.note_detection import add_notes_to_staffs, combine_noteheads_with_stems
+from homr.note_detection import (
+    NoteheadWithStem,
+    add_notes_to_staffs,
+    combine_noteheads_with_stems,
+)
 from homr.onnx_providers import coreml_available, cuda_available, rocm_available
 from homr.pdf_utils import render_pdf_to_image
-from homr.point_mapping import PointMapping, chain, undo_crop, undo_resize
+from homr.point_mapping import PointMapping, chain, invert, undo_crop, undo_resize
 from homr.relieur import process_concat
 from homr.resize import resize_image
 from homr.segmentation.config import segnet_path_onnx, segnet_path_onnx_fp16
@@ -48,7 +52,10 @@ from homr.staff_detection import (
     make_lines_stronger,
 )
 from homr.staff_parsing import parse_staffs
-from homr.staff_position_save_load import load_staff_positions, save_staff_positions
+from homr.staff_position_save_load import (
+    load_staff_positions,
+    save_staff_positions,
+)
 from homr.system_repair import repair_systems
 from homr.title_detection import detect_title, download_ocr_weights
 from homr.transformer.configs import Config, default_config
@@ -120,11 +127,24 @@ def load_and_preprocess_predictions(
     """
     The returned mapping takes coordinates of the predictions back to the input image.
     """
+    predictions, debug, to_input_image, _ = load_and_preprocess_predictions_with_shape(
+        image_path, enable_debug, enable_cache, segnet_use_gpu
+    )
+    return predictions, debug, to_input_image
+
+
+def load_and_preprocess_predictions_with_shape(
+    image_path: str, enable_debug: bool, enable_cache: bool, segnet_use_gpu: bool
+) -> tuple[InputPredictions, Debug, PointMapping, tuple[int, ...]]:
+    """
+    Like load_and_preprocess_predictions, with the numpy shape of the input image as well.
+    """
     image = cv2.imread(image_path)
     if image is None:
         raise InvalidProgramArgumentException(
             "The file format is not supported, please provide a JPG or PNG image file:" + image_path
         )
+    input_shape = image.shape
     image, crop_top_left = autocrop_with_offset(image)
     cropped_shape = image.shape
     image = resize_image(image)
@@ -144,7 +164,7 @@ def load_and_preprocess_predictions(
     debug.write_threshold_image("stems_rest", predictions.stems_rest)
     debug.write_threshold_image("notehead", predictions.notehead)
     debug.write_threshold_image("clefs_keys", predictions.clefs_keys)
-    return predictions, debug, to_input_image
+    return predictions, debug, to_input_image, input_shape
 
 
 def predict_symbols(debug: Debug, predictions: InputPredictions) -> PredictedSymbols:
@@ -205,9 +225,16 @@ def process_image(
             image = resize_image(image)
             to_input_image = undo_resize(original_shape, image.shape)
             debug = Debug(image, image_path, config.enable_debug)
-            staff_position_files = replace_extension(image_path, ".txt")
+            staff_position_files = replace_extension(image_path, ".staves.json")
+            if not os.path.exists(staff_position_files):
+                staff_position_files = replace_extension(image_path, ".txt")
             multi_staffs = load_staff_positions(
-                debug, image, staff_position_files, config.selected_staff
+                debug,
+                image,
+                staff_position_files,
+                config.selected_staff,
+                invert(to_input_image),
+                original_shape,
             )
             title = ""
             # parse_staffs() expects a grayscale image (cv2.findContours requires it),
@@ -246,8 +273,11 @@ def process_image(
         eprint("Finished parsing " + str(len(result_staffs)) + " staves")
         teaser_file = replace_extension(image_path, "_teaser.png")
         if config.write_staff_positions:
-            staff_position_files = replace_extension(image_path, ".txt")
-            save_staff_positions(multi_staffs, image.shape, staff_position_files)
+            staff_position_files = replace_extension(image_path, ".staves.json")
+            input_image = cv2.imread(image_path)
+            save_staff_positions(
+                multi_staffs, staff_position_files, to_input_image, input_image.shape
+            )
         debug.write_teaser(teaser_file, multi_staffs)
         debug.clean_debug_files_from_previous_runs()
 
@@ -263,26 +293,28 @@ def process_image(
 
 
 @dataclass
-class SingleStaffs:
-    """The staffs of a page before they are grouped into systems."""
+class PageSymbols:
+    """What the segmentation of a page finds, before any staff is detected."""
 
     predictions: InputPredictions
     debug: Debug
     to_input_image: PointMapping
-    staffs: list[Staff]
-    notes: list[Note]
-    bar_lines: list[RotatedBoundingBox] = field(default_factory=list)
+    input_shape: tuple[int, ...]
+    symbols: PredictedSymbols
+    noteheads_with_stems: list[NoteheadWithStem]
+    bar_lines: list[RotatedBoundingBox]
 
 
-def detect_single_staffs(image_path: str, config: ProcessingConfig) -> SingleStaffs:
-    predictions, debug, to_input_image = load_and_preprocess_predictions(
+def read_page_symbols(image_path: str, config: ProcessingConfig) -> PageSymbols:
+    """
+    Segments the page and finds its noteheads, stems and bar lines. This is the part of
+    reading a page which doesn't depend on where the staffs are, so a page whose staffs
+    were saved (see staff_position_save_load) starts here.
+    """
+    predictions, debug, to_input_image, input_shape = load_and_preprocess_predictions_with_shape(
         image_path, config.enable_debug, config.enable_cache, config.segnet_use_gpu
     )
     symbols = predict_symbols(debug, predictions)
-
-    symbols.staff_fragments = break_wide_fragments(symbols.staff_fragments)
-    debug.write_bounding_boxes("staff_fragments", symbols.staff_fragments)
-    eprint("Found " + str(len(symbols.staff_fragments)) + " staff line fragments")
 
     noteheads_with_stems = combine_noteheads_with_stems(symbols.noteheads, symbols.stems_rest)
     debug.write_bounding_boxes_alternating_colors("notehead_with_stems", noteheads_with_stems)
@@ -292,7 +324,9 @@ def detect_single_staffs(image_path: str, config: ProcessingConfig) -> SingleSta
             np.median([notehead.notehead.size[1] for notehead in noteheads_with_stems])
         )
     else:
-        unit_size = estimate_unit_size_from_clefs(symbols.staff_fragments, symbols.clefs_keys)
+        unit_size = estimate_unit_size_from_clefs(
+            break_wide_fragments(symbols.staff_fragments), symbols.clefs_keys
+        )
         if unit_size is None:
             raise Exception("No noteheads or clefs found")
         average_note_head_height = unit_size
@@ -309,16 +343,47 @@ def detect_single_staffs(image_path: str, config: ProcessingConfig) -> SingleSta
     bar_line_boxes = detect_bar_lines(bar_lines_or_rests, average_note_head_height)
     debug.write_bounding_boxes_alternating_colors("bar_lines", bar_line_boxes)
     eprint("Found " + str(len(bar_line_boxes)) + " bar lines")
+    return PageSymbols(
+        predictions,
+        debug,
+        to_input_image,
+        input_shape,
+        symbols,
+        noteheads_with_stems,
+        bar_line_boxes,
+    )
+
+
+@dataclass
+class SingleStaffs:
+    """The staffs of a page before they are grouped into systems."""
+
+    predictions: InputPredictions
+    debug: Debug
+    to_input_image: PointMapping
+    staffs: list[Staff]
+    notes: list[Note]
+    bar_lines: list[RotatedBoundingBox] = field(default_factory=list)
+    input_shape: tuple[int, ...] = (0, 0)
+
+
+def detect_single_staffs(image_path: str, config: ProcessingConfig) -> SingleStaffs:
+    page = read_page_symbols(image_path, config)
+    predictions, debug, symbols = page.predictions, page.debug, page.symbols
+
+    symbols.staff_fragments = break_wide_fragments(symbols.staff_fragments)
+    debug.write_bounding_boxes("staff_fragments", symbols.staff_fragments)
+    eprint("Found " + str(len(symbols.staff_fragments)) + " staff line fragments")
 
     debug.write_bounding_boxes(
-        "anchor_input", symbols.staff_fragments + bar_line_boxes + symbols.clefs_keys
+        "anchor_input", symbols.staff_fragments + page.bar_lines + symbols.clefs_keys
     )
     staffs = detect_staff(
         debug,
         predictions.staff,
         symbols.staff_fragments,
         symbols.clefs_keys,
-        bar_line_boxes,
+        page.bar_lines,
         predictions.symbols,
     )
     if len(staffs) == 0:
@@ -327,9 +392,17 @@ def detect_single_staffs(image_path: str, config: ProcessingConfig) -> SingleSta
     debug.write_bounding_boxes_alternating_colors("staffs", staffs)
 
     notes = add_notes_to_staffs(
-        staffs, noteheads_with_stems, predictions.symbols, predictions.notehead
+        staffs, page.noteheads_with_stems, predictions.symbols, predictions.notehead
     )
-    return SingleStaffs(predictions, debug, to_input_image, staffs, notes, bar_line_boxes)
+    return SingleStaffs(
+        predictions,
+        debug,
+        page.to_input_image,
+        staffs,
+        notes,
+        page.bar_lines,
+        page.input_shape,
+    )
 
 
 def group_staffs(predictions: InputPredictions, staffs: list[Staff]) -> list[MultiStaff]:

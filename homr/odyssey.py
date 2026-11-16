@@ -17,14 +17,17 @@ from homr.model import MultiStaff, Staff
 from homr.music_xml_generator import TimeSignature, XmlGeneratorArguments, generate_xml
 from homr.odyssey_align import OdysseyContext, StaffGeometry
 from homr.onnx_providers import coreml_available, cuda_available, rocm_available
+from homr.note_detection import add_notes_to_staffs
+from homr.point_mapping import invert
 from homr.simple_logging import eprint
 from homr.staff_parsing import parse_staffs
+from homr.staff_position_save_load import load_precise_staff_positions, save_staff_positions
 from homr.system_repair import repair_systems
 from homr.transformer.configs import Config
 
 
-# Per system, (top, bottom, slot) of each stave in the pixels of the input image; slot -1 = a stave to ignore
-PageTemplate = list[list[tuple[float, float, int]]]
+# Per system, the slot (part) of each of its staves from the top, as detect_layout lists them; -1 = a stave to ignore
+PageAssignment = list[list[int]]
 IGNORE = -1
 
 
@@ -37,30 +40,40 @@ class LayoutStaff:
     x_end: float
 
 
-def detect_layout(image_path: str) -> list[list[LayoutStaff]]:
+def detect_layout(image_path: str, staves_path: str) -> list[list[LayoutStaff]]:
     """
-    The staffs of a page grouped into systems, top to bottom, by homr's own detection and
-    grouping model. Odyssey shows these for the user to assign parts to, so the template the
-    user makes refers to exactly the staffs that run_page will find. A grand staff is returned
-    as its two staffs.
+    The initial read of a page: homr's own staff detection and grouping model find the staffs
+    and the systems they form, top to bottom. They are saved to staves_path exactly (every
+    staff grid, the grand staffs, the systems), and run_page reads the page from that file
+    without detecting or grouping staffs again. Odyssey shows the staffs returned here for
+    the user to assign parts to; a grand staff is returned as its two staffs.
     """
     config = _processing_config()
     single = homr_main.detect_single_staffs(image_path, config)
     systems = homr_main.group_staffs(single.predictions, single.staffs)
     systems = repair_systems(single.debug, systems)
     single.debug.clean_debug_files_from_previous_runs()
-    result = []
-    for system in sorted(systems, key=lambda m: m.staffs[0].min_y):
-        staffs: list[LayoutStaff] = []
-        for staff in system.staffs:
-            halves = [staff]
-            if staff.is_grandstaff:
-                split = staff.split()
-                if split is not None:
-                    halves = list(split)
-            for half in halves:
-                staffs.append(_layout_staff(half, single.to_input_image))
-        result.append(sorted(staffs, key=lambda s: s.line_ys[0]))
+    systems = sorted(systems, key=lambda m: m.staffs[0].min_y)
+    save_staff_positions(systems, staves_path, single.to_input_image, single.input_shape)
+    return [
+        [_layout_staff(staff, single.to_input_image) for group in _split(system) for staff in group]
+        for system in systems
+    ]
+
+
+def _split(system: MultiStaff) -> list[tuple[Staff, ...]]:
+    """
+    The staffs of a system top to bottom, a grand staff as its upper and lower staff. This
+    is the order of the staffs in detect_layout and in a page assignment.
+    """
+    result: list[tuple[Staff, ...]] = []
+    for staff in system.staffs:
+        halves: tuple[Staff, ...] = (staff,)
+        if staff.is_grandstaff:
+            split = staff.split()
+            if split is not None:
+                halves = split
+        result.append(halves)
     return result
 
 
@@ -106,45 +119,60 @@ def init_models() -> None:
 
 def run_page(
     image_path: str,
+    staves_path: str,
     inherited_times: list[TimeSignature | None] | None = None,
-    template: PageTemplate | None = None,
+    assignment: PageAssignment | None = None,
     slot_is_grandstaff: list[bool] | None = None,
 ) -> PageResult:
     """
-    Read one page. With a template, the staffs homr detects are grouped into systems and parts
-    as the template says (staffs hidden in some systems, grand staffs) instead of by homr's own
-    model; staffs the template doesn't cover are ignored.
+    The full read of one page, on the staffs detect_layout saved to staves_path: staffs are
+    not detected or grouped again, only the page's symbols are segmented. With an assignment
+    the staffs are grouped into systems and parts as the user said (hidden staffs, grand
+    staffs, ignored staffs); without, as saved.
     """
     config = _processing_config()
-    single = homr_main.detect_single_staffs(image_path, config)
+    page = homr_main.read_page_symbols(image_path, config)
+    saved = load_precise_staff_positions(
+        staves_path, invert(page.to_input_image), page.input_shape
+    )
+    systems = [_split(system) for system in saved]
+    add_notes_to_staffs(
+        [staff for system in systems for group in system for staff in group],
+        page.noteheads_with_stems,
+        page.predictions.symbols,
+        page.predictions.notehead,
+    )
     slots: list[tuple[int, ...]] | None = None
-    multi_staffs = None
-    if template and slot_is_grandstaff is not None:
-        grouped = _group_by_template(single, template)
-        if grouped is not None:
-            multi_staffs, slots = grouped
-            eprint("Staffs grouped by the template:", slots)
-    if multi_staffs is None:
-        multi_staffs = homr_main.group_staffs(single.predictions, single.staffs)
-        multi_staffs = repair_systems(single.debug, multi_staffs)
+    if assignment is not None and slot_is_grandstaff is not None:
+        multi_staffs, slots = _group_by_assignment(systems, assignment)
+        eprint("Staffs grouped as assigned:", slots)
+    else:
+        multi_staffs = [
+            MultiStaff(
+                [_join(group) for group in system],
+                [],
+                certain=saved_system.certain,
+            )
+            for system, saved_system in zip(systems, saved, strict=True)
+        ]
     eprint("Found", len(multi_staffs), "systems:", [len(m.staffs) for m in multi_staffs])
 
     transformer_config = Config()
     transformer_config.use_gpu_inference = config.transformer_use_gpu
-    context = OdysseyContext(single.bar_lines, cv2.imread(image_path, cv2.IMREAD_GRAYSCALE))
+    context = OdysseyContext(page.bar_lines, cv2.imread(image_path, cv2.IMREAD_GRAYSCALE))
     voices = parse_staffs(
-        single.debug,
+        page.debug,
         multi_staffs,
-        single.predictions.preprocessed,
+        page.predictions.preprocessed,
         selected_staff=-1,
         config=transformer_config,
-        page_to_input_image=single.to_input_image,
+        page_to_input_image=page.to_input_image,
         odyssey=context,
         slots=slots,
         slot_is_grandstaff=tuple(slot_is_grandstaff) if slots is not None and slot_is_grandstaff else None,
     )
     xml = generate_xml(XmlGeneratorArguments(False, None, None), voices, "", inherited_times)
-    single.debug.clean_debug_files_from_previous_runs()
+    page.debug.clean_debug_files_from_previous_runs()
     from homr.music_xml_generator import last_time_signatures  # noqa: PLC0415
 
     return PageResult(
@@ -154,36 +182,37 @@ def run_page(
     )
 
 
-def _group_by_template(
-    single: "homr_main.SingleStaffs", template: PageTemplate
-) -> tuple[list[MultiStaff], list[tuple[int, ...]]] | None:
-    """Match homr's staffs to the template's staves by their vertical centre."""
-    from homr import staff_relations  # noqa: PLC0415
+def _join(group: tuple[Staff, ...]) -> Staff:
+    """The staff as it was saved: the two halves of a grand staff are merged again."""
+    if len(group) == 1:
+        return group[0]
+    return group[0].merge(group[1])
 
-    staffs = staff_relations.join_pieces_with_model(single.predictions, single.staffs)
 
-    def centre(staff: Staff) -> float:
-        mid = staff.grid[len(staff.grid) // 2]
-        return single.to_input_image((mid.x, float(np.mean(mid.y))))[1]
-
+def _group_by_assignment(
+    systems: list[list[tuple[Staff, ...]]], assignment: PageAssignment
+) -> tuple[list[MultiStaff], list[tuple[int, ...]]]:
+    """
+    Groups the saved staffs into the systems and parts of the assignment. The assignment
+    names the part of every staff of every system in the order of detect_layout, so each
+    staff is found by its place, not by where it is on the page.
+    """
+    if len(assignment) != len(systems):
+        raise ValueError(
+            f"The assignment covers {len(assignment)} systems, the saved page has {len(systems)}"
+        )
     rows: list[MultiStaff] = []
     slots: list[tuple[int, ...]] = []
-    used: set[int] = set()
-    for system in template:
+    for number, (system, assigned) in enumerate(zip(systems, assignment, strict=True)):
+        staffs = [staff for group in system for staff in group]
+        if len(assigned) != len(staffs):
+            raise ValueError(
+                f"System {number} has {len(staffs)} staffs, the assignment names {len(assigned)}"
+            )
         members: dict[int, list[Staff]] = {}
-        for top, bottom, slot in system:
-            margin = (bottom - top) / 2
-            candidates = [
-                (abs(centre(st) - (top + bottom) / 2), i, st)
-                for i, st in enumerate(staffs)
-                if i not in used and top - margin <= centre(st) <= bottom + margin
-            ]
-            if not candidates:
-                continue
-            _, i, st = min(candidates, key=lambda c: c[0])
-            used.add(i)
+        for staff, slot in zip(staffs, assigned, strict=True):
             if slot != IGNORE:
-                members.setdefault(slot, []).append(st)
+                members.setdefault(slot, []).append(staff)
         if not members:
             continue
         row: list[tuple[Staff, int]] = []
@@ -199,10 +228,4 @@ def _group_by_template(
         row.sort(key=lambda item: item[0].min_y)
         rows.append(MultiStaff([st for st, _ in row], [], certain=True))
         slots.append(tuple(slot for _, slot in row))
-    if not rows:
-        return None
-    if len(used) < len(staffs):
-        # never drop music the template doesn't know about: read the page with homr's own grouping
-        eprint("The template doesn't cover", len(staffs) - len(used), "staffs; using homr's own grouping")
-        return None
     return rows, slots
