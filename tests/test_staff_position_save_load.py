@@ -80,7 +80,7 @@ class TestGroupByAssignment(unittest.TestCase):
         self.assertEqual([len(g) for g in _split(single)], [1])
 
     def test_staffs_are_grouped_by_their_place_in_the_assignment(self) -> None:
-        # a piano staff (two halves) and a lone staff on the first system, two single staffs on the second
+        # first system: a piano staff (two halves) and a lone staff; second: two single staffs
         first = [_staff(100), _staff(200), _staff(300)]
         second = [_staff(500), _staff(600)]
         systems = [[(s,) for s in first], [(s,) for s in second]]
