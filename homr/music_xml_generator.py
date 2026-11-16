@@ -10,6 +10,7 @@ from fractions import Fraction
 import numpy as np
 
 from homr import constants
+from homr.odyssey_boxes import box_field
 from homr.simple_logging import eprint
 from homr.transformer.vocabulary import (
     OCTAVE_SHIFT_STOP,
@@ -390,7 +391,11 @@ def build_measures(
                 build_barline_style(symbol, barline)
             if ending_measure is not None and symbol.snapped and symbol.image_coordinates is not None:
                 ending_measure.append(
-                    ET.Comment(f" odyssey-bar: {round(symbol.image_coordinates[0])} ")
+                    ET.Comment(
+                        f" odyssey-bar: {round(symbol.image_coordinates[0])}"
+                        + box_field(symbol.odyssey_box)
+                        + " "
+                    )
                 )
             if ending_measure is current_measure:
                 close_current_measure()
@@ -1373,6 +1378,8 @@ def build_odyssey_meta(xml: ET.Element, symbol: EncodedSymbol) -> None:
         fields.append(f"sys={symbol.odyssey_system}")
     if symbol.odyssey_part is not None:
         fields.append(f"part={symbol.odyssey_part}")
+    if symbol.odyssey_box is not None:
+        fields.append(box_field(symbol.odyssey_box).strip())
     xml.append(ET.Comment(" odyssey: " + " ".join(fields) + " "))
 
 

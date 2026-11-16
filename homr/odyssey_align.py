@@ -12,7 +12,8 @@ import cv2
 import numpy as np
 
 from homr.bounding_boxes import RotatedBoundingBox
-from homr.model import Staff
+from homr.model import Note, Staff
+from homr.odyssey_boxes import Box, box_of_detection, box_to_json
 from homr.point_mapping import PointMapping
 from homr.transformer.vocabulary import EncodedSymbol, empty, nonote
 from homr.type_definitions import NDArray
@@ -34,8 +35,21 @@ class StaffGeometry:
     x_max: float
     unit: float  # distance between two lines
     bars: list[float] = field(default_factory=list)  # detected barline x positions, sorted
+    # the detected box of each barline in `bars` (same order), as (x, y, width, height) pixels
+    bar_boxes: list[Box] = field(default_factory=list)
+    # the staff's extent in y: the top line's highest and the bottom line's lowest point (the
+    # lines can slope on a scan); None falls back to the average line positions
+    y_top: float | None = None
+    y_bottom: float | None = None
     # hairpins below the staff: {"type": "crescendo" | "diminuendo", "x0", "x1", "y", "open_start", "open_end"}
     hairpins: list[dict] = field(default_factory=list)
+
+    @property
+    def box(self) -> Box:
+        """The staff: from the first to the last line, over its whole width."""
+        top = self.line_ys[0] if self.y_top is None else self.y_top
+        bottom = self.line_ys[-1] if self.y_bottom is None else self.y_bottom
+        return self.x_min, top, self.x_max - self.x_min, bottom - top
 
     def to_json(self) -> dict:
         return {
@@ -47,6 +61,8 @@ class StaffGeometry:
             "x_max": self.x_max,
             "unit": self.unit,
             "bars": self.bars,
+            "bbox": box_to_json(self.box),
+            "bar_boxes": [box_to_json(b) for b in self.bar_boxes],
             "hairpins": self.hairpins,
         }
 
@@ -147,17 +163,21 @@ class OdysseyContext:
         unit = float(np.mean(np.diff(line_ys)))
         x_min, x_max = float(min(xs)), float(max(xs))
         top, bottom = line_ys[0] - 2 * unit, line_ys[-1] + 2 * unit
-        bars = []
-        for box in self.bar_lines:
-            x, y = to_input(box.center)
+        bars: list[tuple[float, Box]] = []
+        for detection in self.bar_lines:
+            x, y = to_input(detection.center)
             if top <= y <= bottom and x_min - unit <= x <= x_max + unit:
-                bars.append(float(x))
-        bars.sort()
-        deduped: list[float] = []
-        for x in bars:
-            if not deduped or x - deduped[-1] > 0.75 * unit:
-                deduped.append(x)
-        return StaffGeometry(system, part, half, line_ys, x_min, x_max, unit, deduped)
+                bars.append((float(x), box_of_detection(detection, to_input)))
+        bars.sort(key=lambda bar: bar[0])
+        deduped: list[tuple[float, Box]] = []
+        for bar in bars:
+            if not deduped or bar[0] - deduped[-1][0] > 0.75 * unit:
+                deduped.append(bar)
+        return StaffGeometry(
+            system, part, half, line_ys, x_min, x_max, unit,
+            [x for x, _ in deduped], [box for _, box in deduped],
+            y_top=float(min(pt[1] for pt in mapped[0])), y_bottom=float(max(pt[1] for pt in mapped[-1])),
+        )
 
     def _snap_notes(
         self,
@@ -167,11 +187,13 @@ class OdysseyContext:
         to_input: PointMapping,
     ) -> None:
         notes = [s for s in symbols if _is_pitched_note(s)]
-        candidates = sorted(to_input(n.center) for n in staff.get_notes())
+        heads: list[Note] = sorted(staff.get_notes(), key=lambda n: to_input(n.center))
+        candidates = [to_input(n.center) for n in heads]
         xs = [s.image_coordinates[0] if s.image_coordinates else None for s in notes]
         matches = align(xs, [c[0] for c in candidates], geometry.unit)
         for i, j in matches.items():
             notes[i].image_coordinates = (float(candidates[j][0]), float(candidates[j][1]))
+            notes[i].odyssey_box = box_of_detection(heads[j].box, to_input)
             notes[i].snapped = True
         # a note with no notehead found where it should be is more likely a misreading
         for note in notes:
@@ -185,6 +207,7 @@ class OdysseyContext:
         matches = align(xs, geometry.bars, geometry.unit)
         for i, j in matches.items():
             bars[i].image_coordinates = (geometry.bars[j], y)
+            bars[i].odyssey_box = geometry.bar_boxes[j]
             bars[i].snapped = True
 
     def _snap_rests(self, symbols: list[EncodedSymbol], geometry: StaffGeometry) -> None:
@@ -238,8 +261,9 @@ class OdysseyContext:
             if len(blobs) != len(members):
                 continue
             y = geometry.line_ys[2]
-            for i, (center, _mass) in zip(members, blobs, strict=True):
+            for i, (center, _mass, first, last) in zip(members, blobs, strict=True):
                 symbols[i].image_coordinates = (float(lo + center), float(y))
+                symbols[i].odyssey_box = _ink_box(band, max(top, 0), lo + first, lo + last + 1)
                 symbols[i].snapped = True
 
 
@@ -257,10 +281,31 @@ def _without_staff_lines(ink: NDArray, geometry: StaffGeometry, top: int, bottom
     return band
 
 
-def _blobs(columns: NDArray, min_height: float, max_width: float, gap: int) -> list[tuple[float, float]]:
-    """Runs of inked columns as (centre, mass); runs wider than max_width (beams) are dropped."""
+def _ink_box(band: NDArray, band_top: int, x0: int, x1: int) -> Box:
+    """
+    The box of the ink in columns x0..x1 of the staff band (which starts at row `band_top`).
+    Of the separate runs of inked rows (gaps of up to 2 rows are bridged) only the heaviest
+    counts, so a slur or a ledger line passing close to the rest isn't part of its box.
+    """
+    rows = band[:, x0:x1].sum(axis=1)
+    inked = np.nonzero(rows)[0]
+    if len(inked) == 0:
+        return float(x0), float(band_top), float(x1 - x0), float(band.shape[0])
+    breaks = np.nonzero(np.diff(inked) > 3)[0] + 1  # noqa: PLR2004
+    runs = np.split(inked, breaks)
+    best = max(runs, key=lambda run: rows[run].sum())
+    return float(x0), float(band_top + best[0]), float(x1 - x0), float(best[-1] - best[0] + 1)
+
+
+def _blobs(
+    columns: NDArray, min_height: float, max_width: float, gap: int
+) -> list[tuple[float, float, int, int]]:
+    """
+    Runs of inked columns as (centre, mass, first column, last column); runs wider than
+    max_width (beams) are dropped.
+    """
     on = columns >= min_height
-    result: list[tuple[float, float]] = []
+    result: list[tuple[float, float, int, int]] = []
     start, last = None, None
     for x, flag in enumerate(list(on) + [False] * (gap + 1)):
         if flag:
@@ -272,7 +317,9 @@ def _blobs(columns: NDArray, min_height: float, max_width: float, gap: int) -> l
                 xs = np.arange(start, last + 1)
                 weights = columns[start : last + 1]
                 if weights.sum() > 0:
-                    result.append((float((xs * weights).sum() / weights.sum()), float(weights.sum())))
+                    result.append(
+                        (float((xs * weights).sum() / weights.sum()), float(weights.sum()), start, last)
+                    )
             start, last = None, None
     return result
 
