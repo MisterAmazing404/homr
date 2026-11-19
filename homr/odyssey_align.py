@@ -220,20 +220,63 @@ class OdysseyContext:
         geometry: StaffGeometry,
         to_input: PointMapping,
     ) -> None:
-        notes = [s for s in symbols if _is_pitched_note(s)]
-        heads: list[Note] = sorted(staff.get_notes(), key=lambda n: to_input(n.center))
-        candidates = [to_input(n.center) for n in heads]
-        xs = [s.image_coordinates[0] if s.image_coordinates else None for s in notes]
-        matches = align(xs, [c[0] for c in candidates], geometry.unit)
-        for i, j in matches.items():
-            box = box_of_detection(heads[j].box, to_input)
-            notes[i].odyssey_box = box
-            notes[i].image_coordinates = (box[0] + box[2] / 2, box[1] + box[3] / 2)
-            notes[i].snapped = True
+        # Group simultaneous chord noteheads (separated by "chord" tokens) into columns so
+        # extra/missing detections on one chord cannot spill onto the next beat (snippet 1795004083875).
+        chords: list[list[EncodedSymbol]] = []
+        in_chord = False
+        for s in symbols:
+            if s.rhythm == "chord":
+                in_chord = True
+            elif _is_pitched_note(s):
+                if in_chord and chords:
+                    chords[-1].append(s)
+                else:
+                    chords.append([s])
+                in_chord = False
+            else:
+                in_chord = False
+
+        heads: list[Note] = sorted(staff.get_notes(), key=lambda n: to_input(n.center)[0])
+        head_boxes = [box_of_detection(n.box, to_input) for n in heads]
+        head_centers = [(b[0] + b[2] / 2, b[1] + b[3] / 2) for b in head_boxes]
+
+        # Cluster detected noteheads into vertical columns (within 0.85 staff spaces).
+        col_gap = 0.85 * max(geometry.unit, 1.0)
+        columns: list[list[int]] = []
+        for idx, (cx, _) in enumerate(head_centers):
+            if columns and cx - head_centers[columns[-1][0]][0] <= col_gap:
+                columns[-1].append(idx)
+            else:
+                columns.append([idx])
+
+        chord_xs: list[float | None] = []
+        for ch in chords:
+            cxs = [s.image_coordinates[0] for s in ch if s.image_coordinates]
+            chord_xs.append(float(np.median(cxs)) if cxs else None)
+        col_xs = [float(np.median([head_centers[i][0] for i in col])) for col in columns]
+
+        matches = align(chord_xs, col_xs, geometry.unit)
+        for ci, col_idx in matches.items():
+            ch = chords[ci]
+            col = sorted(columns[col_idx], key=lambda idx: head_centers[idx][1])
+            rep = col[len(col) // 2]
+            # Sort chord notes by their transformer y when available, else keep token order.
+            order = sorted(
+                range(len(ch)),
+                key=lambda k: ch[k].image_coordinates[1] if ch[k].image_coordinates else float(k),
+            )
+            for rank, k in enumerate(order):
+                det_idx = col[rank] if rank < len(col) else rep
+                box = head_boxes[det_idx]
+                ch[k].odyssey_box = box
+                ch[k].image_coordinates = head_centers[det_idx]
+                ch[k].snapped = True
+
         # a note with no notehead found where it should be is more likely a misreading
-        for note in notes:
-            if not note.snapped and note.confidence is not None:
-                note.confidence *= UNMATCHED_PENALTY
+        for ch in chords:
+            for note in ch:
+                if not note.snapped and note.confidence is not None:
+                    note.confidence *= UNMATCHED_PENALTY
 
     def _snap_bars(self, symbols: list[EncodedSymbol], geometry: StaffGeometry) -> None:
         bars = [s for s in symbols if "barline" in s.rhythm]
