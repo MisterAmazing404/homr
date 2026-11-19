@@ -127,6 +127,33 @@ def _is_lower(symbol: EncodedSymbol) -> bool:
     return symbol.position.startswith("lower")
 
 
+def chords_of(
+    half_symbols: list[EncodedSymbol], all_symbols: list[EncodedSymbol]
+) -> list[list[EncodedSymbol]]:
+    """
+    The pitched notes of one staff half, grouped into the chords that sound together.
+    A "chord" token joins the next symbol to the group before it, as in Homr's own
+    sort_token_chords. It must be read on the whole system's token stream: on a grand
+    staff "C5 chord C3" joins a right-hand note to a left-hand one, and with the other
+    half's notes taken away the token would join C5 to the next right-hand note instead,
+    so both got C5's notehead (snippet 1795004083875: two beats drawn on one x).
+    """
+    groups: list[list[EncodedSymbol]] = []
+    joining = False
+    for s in all_symbols:
+        if s.rhythm == "chord":
+            joining = True
+            continue
+        if joining and groups:
+            groups[-1].append(s)
+        else:
+            groups.append([s])
+        joining = False
+    in_half = {id(s) for s in half_symbols}
+    chords = [[s for s in g if id(s) in in_half and _is_pitched_note(s)] for g in groups]
+    return [c for c in chords if c]
+
+
 class OdysseyContext:
     """Collects staff geometry and snaps symbol positions while homr parses a page."""
 
@@ -166,7 +193,7 @@ class OdysseyContext:
                 s for s in symbols if len(halves) == 1 or _is_lower(s) == (half_no == 1)
             ]
             geometry = self._geometry(half, system, part, half_no, to_input)
-            self._snap_notes(half_symbols, half, geometry, to_input)
+            self._snap_notes(half_symbols, half, geometry, to_input, all_symbols=symbols)
             self._snap_bars(half_symbols, geometry)
             self._snap_rests(half_symbols, geometry)
             if self.page is not None:
@@ -219,22 +246,11 @@ class OdysseyContext:
         staff: Staff,
         geometry: StaffGeometry,
         to_input: PointMapping,
+        all_symbols: list[EncodedSymbol] | None = None,
     ) -> None:
-        # Group simultaneous chord noteheads (separated by "chord" tokens) into columns so
-        # extra/missing detections on one chord cannot spill onto the next beat (snippet 1795004083875).
-        chords: list[list[EncodedSymbol]] = []
-        in_chord = False
-        for s in symbols:
-            if s.rhythm == "chord":
-                in_chord = True
-            elif _is_pitched_note(s):
-                if in_chord and chords:
-                    chords[-1].append(s)
-                else:
-                    chords.append([s])
-                in_chord = False
-            else:
-                in_chord = False
+        # Group simultaneous chord noteheads into columns so extra/missing detections on one
+        # chord cannot spill onto the next beat (snippet 1795004083875).
+        chords = chords_of(symbols, all_symbols if all_symbols is not None else symbols)
 
         heads: list[Note] = sorted(staff.get_notes(), key=lambda n: to_input(n.center)[0])
         head_boxes = [box_of_detection(n.box, to_input) for n in heads]
